@@ -10,10 +10,10 @@
       "price_poll_interval_sec": 60,
       "position_sync_interval_sec": 60,
       "order_dispatch_interval_sec": 60,
-      "cash_pct_per_trade": 0.02,
+      "cash_pct_per_trade": 0.01,
       "min_trade_amount": 5,
       "fixed_trade_amount": 0,
-      "max_entry_price": 0.65,
+      "max_entry_price": 0.95,
       "allowed_slippage": 0.3,
       "request_concurrency": 4,
       "buy_retry_count": 3,
@@ -21,7 +21,16 @@
       "max_backoff_sec": 900,
       "max_new_positions": -1,
       "shutdown_on_max_new_positions": false,
-      "redeemer_interval_sec": 1800
+      "redeemer_interval_sec": 1800,
+      "clob_rate_limit_rps": 5.0,
+      "clob_rate_limit_burst": 10.0,
+      "min_market_age_sec": 0,
+      "max_market_age_sec": 0,
+      "min_market_age_pct": 0.0,
+      "max_market_age_pct": 1.0,
+      "min_time_remaining_sec": 3600,
+      "limit_order_max_age_sec": 0,
+      "max_positions_per_category": -1
     }
   }
 }

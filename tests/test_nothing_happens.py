@@ -18,8 +18,8 @@ from bot.standalone_markets import fetch_all_open_markets
 from bot.standalone_markets import fetch_candidate_markets
 from bot.strategy.nothing_happens import (
     NothingHappensRuntime,
+    _bid_depth_notional,
     _fetch_open_positions,
-    _max_notional_within_price,
 )
 
 
@@ -35,16 +35,17 @@ class StubExchange:
         collateral_balance: float = 100.0,
         conditional_balance: float = 0.0,
         order_books: dict[str, OrderBookSnapshot] | None = None,
-        place_market_order_result=None,
-        place_market_order_error: Exception | None = None,
+        place_limit_order_result=None,
+        place_limit_order_error: Exception | None = None,
     ) -> None:
         self.collateral_balance = collateral_balance
         self.conditional_balance = conditional_balance
         self.order_books = order_books or {}
-        self.place_market_order_result = place_market_order_result
-        self.place_market_order_error = place_market_order_error
-        self.market_orders = []
+        self.place_limit_order_result = place_limit_order_result
+        self.place_limit_order_error = place_limit_order_error
+        self.limit_orders = []
         self.warmed_tokens = []
+        self._limit_order_seq = 0
 
     def get_collateral_balance(self) -> float:
         return self.collateral_balance
@@ -58,21 +59,24 @@ class StubExchange:
     def warm_token_cache(self, token_id: str) -> None:
         self.warmed_tokens.append(token_id)
 
-    def place_market_order(self, intent):
-        self.market_orders.append(intent)
-        if self.place_market_order_error is not None:
-            raise self.place_market_order_error
-        if self.place_market_order_result is not None:
-            return self.place_market_order_result
+    def place_limit_order(self, intent):
+        self.limit_orders.append(intent)
+        if self.place_limit_order_error is not None:
+            raise self.place_limit_order_error
+        if self.place_limit_order_result is not None:
+            return self.place_limit_order_result
+        self._limit_order_seq += 1
         return SimpleNamespace(
-            status="matched",
-            order_id="order-1",
-            raw={
-                "_fill_price": str(intent.reference_price),
-                "makingAmount": str(intent.amount),
-                "takingAmount": str(intent.amount / max(intent.reference_price, 0.01)),
-            },
+            status="open",
+            order_id=f"lim-{self._limit_order_seq}",
+            raw={},
         )
+
+    def get_order(self, order_id: str):
+        return None
+
+    def cancel_order(self, order_id: str) -> bool:
+        return True
 
 
 class SequencedExchange(StubExchange):
@@ -80,10 +84,10 @@ class SequencedExchange(StubExchange):
         super().__init__(**kwargs)
         self._order_steps = list(order_steps)
 
-    def place_market_order(self, intent):
-        self.market_orders.append(intent)
+    def place_limit_order(self, intent):
+        self.limit_orders.append(intent)
         if not self._order_steps:
-            return super().place_market_order(intent)
+            return super().place_limit_order(intent)
         step = self._order_steps.pop(0)
         if isinstance(step, Exception):
             raise step
@@ -150,6 +154,7 @@ def _make_market(*, slug: str = "will-it-rain") -> StandaloneMarket:
         end_ts=_FUTURE_END_TS,
         category="Weather",
         event_slug=slug,
+        end_date_ts=_FUTURE_END_TS,
     )
 
 
@@ -288,20 +293,19 @@ class StubGammaSession:
         return response
 
 
-def test_max_notional_within_price_only_counts_safe_asks() -> None:
+def test_bid_depth_notional_sums_bid_levels() -> None:
     book = OrderBookSnapshot(
         token_id="token-1",
-        bids=(),
-        asks=(
-            OrderBookLevel(price=0.60, size=10.0),
-            OrderBookLevel(price=0.65, size=20.0),
-            OrderBookLevel(price=0.66, size=30.0),
+        bids=(
+            OrderBookLevel(price=0.59, size=10.0),
+            OrderBookLevel(price=0.58, size=5.0),
         ),
+        asks=(),
         tick_size=0.01,
         min_order_size=5.0,
     )
 
-    assert _max_notional_within_price(book, 0.65) == 19.0
+    assert _bid_depth_notional(book) == pytest.approx(10.0 * 0.59 + 5.0 * 0.58)
 
 
 @pytest.mark.asyncio
@@ -381,7 +385,7 @@ async def test_evaluate_market_queues_pending_buy_instead_of_buying_immediately(
     await runtime._evaluate_market(market)
 
     assert market.slug in runtime._pending_entries_by_slug
-    assert exchange.market_orders == []
+    assert exchange.limit_orders == []
 
 
 @pytest.mark.asyncio
@@ -430,9 +434,10 @@ async def test_dispatch_next_pending_entry_submits_only_one_queued_order() -> No
     attempted = await runtime._dispatch_next_pending_entry()
 
     assert attempted is True
-    assert len(exchange.market_orders) == 1
-    assert market_one.slug in runtime._positions_by_slug
-    assert market_one.slug not in runtime._pending_entries_by_slug
+    assert len(exchange.limit_orders) == 1
+    assert market_one.slug in runtime._pending_entries_by_slug
+    assert runtime._pending_entries_by_slug[market_one.slug].order_id
+    assert market_one.slug not in runtime._positions_by_slug
     assert market_two.slug in runtime._pending_entries_by_slug
 
 
@@ -441,7 +446,7 @@ async def test_dispatch_failed_order_requeues_pending_buy() -> None:
     market = _make_market(slug="retry-me")
     exchange = StubExchange(
         order_books={market.no_token_id: _make_book(token_id=market.no_token_id)},
-        place_market_order_error=RuntimeError("couldn't be fully filled"),
+        place_limit_order_error=RuntimeError("couldn't be fully filled"),
     )
     runtime = _make_runtime(
         exchange=exchange,
@@ -457,11 +462,11 @@ async def test_dispatch_failed_order_requeues_pending_buy() -> None:
     attempted = await runtime._dispatch_next_pending_entry()
 
     assert attempted is True
-    assert len(exchange.market_orders) == 1
+    assert len(exchange.limit_orders) == 1
     assert market.slug in runtime._pending_entries_by_slug
     pending = runtime._pending_entries_by_slug[market.slug]
     assert pending.dispatch_failures == 1
-    assert pending.last_error == "order_attempt_failed"
+    assert "couldn't be fully filled" in pending.last_error
     assert pending.next_attempt_monotonic > asyncio.get_running_loop().time()
     assert market.slug not in runtime._positions_by_slug
     assert runtime._cash_balance == pytest.approx(100.0)
@@ -491,23 +496,21 @@ async def test_dispatch_ambiguous_order_failure_quarantines_without_immediate_re
     attempted = await runtime._dispatch_next_pending_entry()
 
     assert attempted is True
-    assert len(exchange.market_orders) == 1
+    assert len(exchange.limit_orders) == 1
     assert market.slug in runtime._pending_entries_by_slug
     pending = runtime._pending_entries_by_slug[market.slug]
     assert pending.dispatch_failures == 1
-    assert pending.last_error == "ambiguous_order_attempt_failed"
-    assert pending.next_attempt_monotonic - asyncio.get_running_loop().time() >= 64.0
+    assert "Request exception" in pending.last_error
+    # Requeue uses order_dispatch_interval_sec * 2^0 == 60s for first failure
+    assert pending.next_attempt_monotonic - asyncio.get_running_loop().time() >= 60.0
     assert market.slug not in runtime._positions_by_slug
-    assert runtime._ambiguous_reserved_notional_by_slug[market.slug] == pytest.approx(5.0)
-    assert runtime._available_cash_balance() == pytest.approx(95.0)
-    assert len(recovery.created) == 1
-    assert recovery.created[0]["market"].slug == market.slug
-    assert recovery.created[0]["side"] == "DOWN"
-    assert len(recovery.scheduled) == 1
+    assert runtime._ambiguous_reserved_notional_by_slug == {}
+    assert len(recovery.created) == 0
 
 
 @pytest.mark.asyncio
 async def test_ambiguous_reservation_blocks_second_full_size_entry() -> None:
+    """First pending limit fails; second pending is not dispatched in the same cycle."""
     market_one = _make_market(slug="ambiguous-one")
     market_two = _make_market(slug="ambiguous-two")
     recovery = StubRecoveryCoordinator()
@@ -518,15 +521,7 @@ async def test_ambiguous_reservation_blocks_second_full_size_entry() -> None:
         },
         order_steps=[
             RuntimeError("Request exception!"),
-            SimpleNamespace(
-                status="matched",
-                order_id="order-2",
-                raw={
-                    "_fill_price": "0.5",
-                    "makingAmount": "5.0",
-                    "takingAmount": "10.0",
-                },
-            ),
+            SimpleNamespace(status="open", order_id="lim-2", raw={}),
         ],
     )
     runtime = _make_runtime(
@@ -547,21 +542,20 @@ async def test_ambiguous_reservation_blocks_second_full_size_entry() -> None:
     attempted_two = await runtime._dispatch_next_pending_entry()
 
     assert attempted_one is True
-    assert attempted_two is False
-    assert len(exchange.market_orders) == 1
-    assert market_one.slug in runtime._recovery_blocked_slugs
-    assert market_two.slug not in runtime._positions_by_slug
-    assert runtime._available_cash_balance() == pytest.approx(0.0)
+    assert attempted_two is True
+    assert len(exchange.limit_orders) == 2
+    assert market_one.slug in runtime._pending_entries_by_slug
+    assert market_two.slug in runtime._pending_entries_by_slug
+    assert runtime._pending_entries_by_slug[market_two.slug].order_id == "lim-2"
 
 
 @pytest.mark.asyncio
 async def test_dispatch_clean_rejection_retries_within_attempt_loop() -> None:
+    """GTC places once per dispatch; failures requeue (no in-call retry loop)."""
     market = _make_market(slug="clean-rejection")
     exchange = SequencedExchange(
         order_books={market.no_token_id: _make_book(token_id=market.no_token_id)},
         order_steps=[
-            RuntimeError("couldn't be fully filled"),
-            RuntimeError("couldn't be fully filled"),
             RuntimeError("couldn't be fully filled"),
         ],
     )
@@ -580,23 +574,20 @@ async def test_dispatch_clean_rejection_retries_within_attempt_loop() -> None:
     attempted = await runtime._dispatch_next_pending_entry()
 
     assert attempted is True
-    assert len(exchange.market_orders) == 3
+    assert len(exchange.limit_orders) == 1
     pending = runtime._pending_entries_by_slug[market.slug]
-    assert pending.last_error == "order_attempt_failed"
+    assert "couldn't be fully filled" in pending.last_error
 
 
 @pytest.mark.asyncio
 async def test_success_without_fill_quantities_quarantines_instead_of_fabricating_position() -> None:
+    """Limit placement returns an order id; fill is handled by the poll loop, not dispatch."""
     market = _make_market(slug="missing-fill-data")
     recovery = StubRecoveryCoordinator()
     exchange = SequencedExchange(
         order_books={market.no_token_id: _make_book(token_id=market.no_token_id)},
         order_steps=[
-            SimpleNamespace(
-                status="matched",
-                order_id="order-1",
-                raw={"_fill_price": "0.5"},
-            )
+            SimpleNamespace(status="live", order_id="order-1", raw={}),
         ],
     )
     runtime = _make_runtime(
@@ -617,11 +608,11 @@ async def test_success_without_fill_quantities_quarantines_instead_of_fabricatin
     assert attempted is True
     assert market.slug not in runtime._positions_by_slug
     assert market.slug in runtime._pending_entries_by_slug
-    assert runtime._ambiguous_reserved_notional_by_slug[market.slug] == pytest.approx(5.0)
-    assert runtime._available_cash_balance() == pytest.approx(95.0)
-    assert recovery.created[0]["order_id"] == "order-1"
+    assert runtime._pending_entries_by_slug[market.slug].order_id == "order-1"
+    assert runtime._ambiguous_reserved_notional_by_slug == {}
+    assert len(recovery.created) == 0
     pending = runtime._pending_entries_by_slug[market.slug]
-    assert pending.last_error == "ambiguous_fill_data_missing"
+    assert pending.last_error == ""
 
 
 @pytest.mark.asyncio
@@ -984,8 +975,8 @@ async def test_build_entry_plan_uses_submitted_price_for_share_minimums() -> Non
     )
 
     assert plan is not None
-    assert plan.no_ask == pytest.approx(0.50)
-    assert plan.target_notional == pytest.approx(6.5)
+    assert plan.entry_price == pytest.approx(0.59)
+    assert plan.target_notional == pytest.approx(5.9)
 
 
 def test_record_local_fill_sets_shutdown_after_max_new_positions() -> None:

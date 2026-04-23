@@ -1,9 +1,9 @@
 import logging
-import os
 import time
 from typing import Any
 
 from bot.config import ExchangeConfig
+from bot.rate_limiter import TokenBucketLimiter
 from bot.models import (
     LimitOrderIntent,
     MarketOrderIntent,
@@ -26,10 +26,17 @@ TOKEN_DECIMAL_FACTOR = 10**6  # Both USDC and conditional tokens use 6 decimals 
 
 
 class PolymarketClobExchangeClient:
-    def __init__(self, config: ExchangeConfig, allow_trading: bool) -> None:
+    def __init__(
+        self,
+        config: ExchangeConfig,
+        allow_trading: bool,
+        *,
+        clob_rate_limit_rps: float = 5.0,
+        clob_rate_limit_burst: float = 10.0,
+    ) -> None:
         try:
-            from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import (
+            from py_clob_client_v2.client import ClobClient
+            from py_clob_client_v2.clob_types import (
                 AssetType,
                 BalanceAllowanceParams,
                 MarketOrderArgs,
@@ -38,10 +45,10 @@ class PolymarketClobExchangeClient:
                 OrderType,
                 TradeParams,
             )
-            from py_clob_client.order_builder.constants import BUY, SELL
+            from py_clob_client_v2.order_builder.constants import BUY, SELL
         except ImportError as exc:
             raise RuntimeError(
-                "Missing dependency py-clob-client. Install with: pip install -r requirements.txt"
+                "Missing dependency py-clob-client-v2. Install with: pip install -r requirements.txt"
             ) from exc
 
         self.allow_trading = allow_trading
@@ -49,7 +56,8 @@ class PolymarketClobExchangeClient:
         self.signature_type = config.signature_type
         self.funder_address = config.funder_address
         self.chain_id = config.chain_id
-        self.rpc_url = (os.getenv("POLYGON_RPC_URL") or "").strip()
+        self.rpc_url = (config.polygon_rpc_url or "").strip()
+        self._limiter = TokenBucketLimiter(rate=clob_rate_limit_rps, burst=clob_rate_limit_burst)
         self._asset_type = AssetType
         self._balance_allowance_params = BalanceAllowanceParams
         self._market_order_args = MarketOrderArgs
@@ -62,7 +70,7 @@ class PolymarketClobExchangeClient:
 
         client_kwargs: dict[str, Any] = {"chain_id": config.chain_id}
         if config.private_key:
-            client_kwargs["key"] = config.private_key
+            client_kwargs["key"] = config.private_key.get_secret_value()
             client_kwargs["signature_type"] = config.signature_type
         if config.funder_address:
             client_kwargs["funder"] = config.funder_address
@@ -73,10 +81,14 @@ class PolymarketClobExchangeClient:
             raise ValueError("PRIVATE_KEY is required when order transmission is enabled")
 
         if config.private_key:
-            creds = self.client.create_or_derive_api_creds()
+            creds = self.client.create_or_derive_api_key()
             self.client.set_api_creds(creds)
 
+    def _clob_acquire(self) -> None:
+        self._limiter.acquire_sync()
+
     def get_mid_price(self, token_id: str) -> float:
+        self._clob_acquire()
         midpoint = self.client.get_midpoint(token_id)
         if isinstance(midpoint, dict):
             value = midpoint.get("mid")
@@ -92,6 +104,7 @@ class PolymarketClobExchangeClient:
 
     def get_market_rules(self, token_id: str) -> MarketRules | None:
         try:
+            self._clob_acquire()
             order_book = self.client.get_order_book(token_id)
             tick_size = float(order_book.tick_size)
             min_order_size = float(order_book.min_order_size)
@@ -107,25 +120,37 @@ class PolymarketClobExchangeClient:
             return None
 
     def get_order_book(self, token_id: str) -> OrderBookSnapshot:
-        order_book = self.client.get_order_book(token_id)
-        bids = tuple(
-            OrderBookLevel(price=float(level.price), size=float(level.size))
-            for level in (order_book.bids or [])
-        )
-        asks = tuple(
-            OrderBookLevel(price=float(level.price), size=float(level.size))
-            for level in (order_book.asks or [])
-        )
+        self._clob_acquire()
+        raw = self.client.get_order_book(token_id)
+        # V2 SDK returns a plain dict; handle both dict and object for safety
+        def _get(obj, key, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        def _parse_levels(levels):
+            if not levels:
+                return ()
+            return tuple(
+                OrderBookLevel(
+                    price=float(_get(level, "price", 0)),
+                    size=float(_get(level, "size", 0)),
+                )
+                for level in levels
+            )
+
+        bids = _parse_levels(_get(raw, "bids"))
+        asks = _parse_levels(_get(raw, "asks"))
         try:
-            timestamp = int(order_book.timestamp or 0)
+            timestamp = int(_get(raw, "timestamp") or 0)
         except (TypeError, ValueError):
             timestamp = 0
         return OrderBookSnapshot(
             token_id=token_id,
             bids=bids,
             asks=asks,
-            tick_size=float(order_book.tick_size),
-            min_order_size=float(order_book.min_order_size),
+            tick_size=float(_get(raw, "tick_size", 0)),
+            min_order_size=float(_get(raw, "min_order_size", 0)),
             timestamp=timestamp,
         )
 
@@ -133,6 +158,7 @@ class PolymarketClobExchangeClient:
         """Pre-fetch tick_size, neg_risk, fee_rate for a token so
         create_market_order doesn't hit the network on first trade."""
         try:
+            self._clob_acquire()
             self.client.get_tick_size(token_id)
             self.client.get_neg_risk(token_id)
             self.client.get_fee_rate_bps(token_id)
@@ -143,11 +169,33 @@ class PolymarketClobExchangeClient:
         if not self.private_key:
             return []
 
-        raw_orders = self.client.get_orders(self._open_order_params(asset_id=token_id))
+        self._clob_acquire()
+        raw_orders = self.client.get_open_orders(self._open_order_params(asset_id=token_id))
         parsed: list[OpenOrder] = []
         for raw in raw_orders:
             try:
                 parsed.append(self._parse_order_snapshot(raw, default_token_id=token_id))
+            except Exception as exc:
+                logger.warning(
+                    "failed to parse open order",
+                    extra={
+                        "error": str(exc),
+                        "raw_keys": list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__,
+                    },
+                )
+                continue
+        return parsed
+
+    def get_all_open_orders(self) -> list[OpenOrder]:
+        if not self.private_key:
+            return []
+
+        self._clob_acquire()
+        raw_orders = self.client.get_open_orders(self._open_order_params())
+        parsed: list[OpenOrder] = []
+        for raw in raw_orders:
+            try:
+                parsed.append(self._parse_order_snapshot(raw))
             except Exception as exc:
                 logger.warning(
                     "failed to parse open order",
@@ -164,6 +212,7 @@ class PolymarketClobExchangeClient:
             return None
 
         try:
+            self._clob_acquire()
             raw = self.client.get_order(order_id)
         except Exception as exc:
             logger.warning(
@@ -185,6 +234,7 @@ class PolymarketClobExchangeClient:
         if not self.allow_trading:
             raise RuntimeError("Order transmission is disabled")
 
+        self._clob_acquire()
         side = self._buy if order.side == Side.BUY else self._sell
         order_args = self._order_args(
             price=order.price,
@@ -216,6 +266,7 @@ class PolymarketClobExchangeClient:
         if not self.allow_trading:
             raise RuntimeError("Order transmission is disabled")
 
+        self._clob_acquire()
         side = self._buy if order.side == Side.BUY else self._sell
 
         # For SELL orders, force-sync the conditional token balance right before
@@ -361,6 +412,7 @@ class PolymarketClobExchangeClient:
             return []
 
         try:
+            self._clob_acquire()
             params = self._trade_params(asset_id=token_id, after=after_timestamp)
             raw_trades = self.client.get_trades(params)
         except Exception as exc:
@@ -397,7 +449,7 @@ class PolymarketClobExchangeClient:
             if not self.rpc_url:
                 raise ValueError("POLYGON_RPC_URL is required for proxy-wallet approval bootstrap")
             approvals_set = ensure_conditional_token_approvals(
-                private_key=self.private_key,
+                private_key=self.private_key.get_secret_value() if self.private_key else "",
                 proxy_address=self.funder_address,
                 chain_id=self.chain_id,
                 rpc_url=self.rpc_url,
@@ -493,6 +545,7 @@ class PolymarketClobExchangeClient:
         if not self.allow_trading:
             return False
         try:
+            self._clob_acquire()
             self.client.cancel(order_id)
             return True
         except Exception as exc:
@@ -509,6 +562,7 @@ class PolymarketClobExchangeClient:
         if not self.allow_trading:
             return False
         try:
+            self._clob_acquire()
             self.client.cancel_all()
             return True
         except Exception as exc:
@@ -517,6 +571,7 @@ class PolymarketClobExchangeClient:
 
     def _get_balance_allowance(self, asset_type: Any, token_id: str | None = None) -> dict[str, float]:
         try:
+            self._clob_acquire()
             raw = self.client.get_balance_allowance(
                 params=self._balance_allowance_params(
                     asset_type=asset_type,
@@ -542,6 +597,7 @@ class PolymarketClobExchangeClient:
     def _sync_balance_allowance(self, asset_type: Any, token_id: str | None = None) -> bool:
         """Sync balance allowance with the CLOB. Returns True on success."""
         try:
+            self._clob_acquire()
             self.client.update_balance_allowance(
                 params=self._balance_allowance_params(
                     asset_type=asset_type,

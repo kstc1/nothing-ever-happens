@@ -16,6 +16,9 @@ class ExchangeClient(Protocol):
     def get_open_orders(self, token_id: str) -> list[OpenOrder]:
         ...
 
+    def get_all_open_orders(self) -> list[OpenOrder]:
+        ...
+
     def get_order(self, order_id: str) -> OpenOrder | None:
         ...
 

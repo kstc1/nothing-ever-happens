@@ -44,7 +44,7 @@ def resolve_default_wallet() -> str | None:
         if exchange_cfg.signature_type == 0 and exchange_cfg.private_key:
             from eth_account import Account
 
-            return str(Account.from_key(exchange_cfg.private_key).address)
+            return str(Account.from_key(exchange_cfg.private_key.get_secret_value()).address)
     except Exception:
         return None
     return None
@@ -78,7 +78,7 @@ def fetch_trades_authenticated(after_ts: int) -> list[dict]:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
         from bot.config import load_nothing_happens_config
         from bot.exchange.polymarket_clob import PolymarketClobExchangeClient
-        from py_clob_client.clob_types import TradeParams
+        from py_clob_client_v2.clob_types import TradeParams
 
         exchange_cfg, _ = load_nothing_happens_config()
         client = PolymarketClobExchangeClient(exchange_cfg, allow_trading=False)

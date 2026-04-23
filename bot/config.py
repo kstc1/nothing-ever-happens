@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from bot.secret_str import SecretStr
+
 
 SUPPORTED_RUNTIME = "nothing_happens"
 
@@ -18,6 +20,30 @@ def _env_bool(name: str, default: bool) -> bool:
 def _env_optional(name: str) -> str | None:
     raw = os.getenv(name)
     return raw if raw else None
+
+
+def _env_secret(name: str) -> SecretStr | None:
+    raw = os.getenv(name, "").strip()
+    return SecretStr(raw) if raw else None
+
+
+def _env_positive_float_or_inf(name: str) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw or raw == "0":
+        return float("inf")
+    return float(raw)
+
+
+def _max_market_age_from_strategy(strat: dict[str, Any]) -> float:
+    raw = strat.get("max_market_age_sec")
+    if raw is None:
+        return float("inf")
+    if isinstance(raw, str) and raw.strip().lower() in {"inf", "infinity", ""}:
+        return float("inf")
+    value = float(raw)
+    if value == 0.0:
+        return float("inf")
+    return value
 
 
 def _env_int(name: str, default: int) -> int:
@@ -78,8 +104,9 @@ class ExchangeConfig:
     host: str
     chain_id: int
     signature_type: int
-    private_key: str | None
+    private_key: SecretStr | None
     funder_address: str | None
+    polygon_rpc_url: str | None = None
     live_send_enabled: bool = False
 
     def validate(self) -> None:
@@ -101,6 +128,16 @@ class ExchangeConfig:
                 "FUNDER_ADDRESS is required in live mode with signature_type "
                 f"{self.signature_type} (proxy/delegated wallet)"
             )
+        if (
+            self.live_send_enabled
+            and self.signature_type == 2
+            and self.funder_address
+            and not (self.polygon_rpc_url or "").strip()
+        ):
+            raise ValueError(
+                "POLYGON_RPC_URL is required in live mode with signature_type 2 "
+                "(proxy-wallet approval bootstrap)"
+            )
 
 
 def _build_exchange_config(conn: dict[str, Any]) -> ExchangeConfig:
@@ -108,8 +145,9 @@ def _build_exchange_config(conn: dict[str, Any]) -> ExchangeConfig:
         host=str(conn.get("host", "https://clob.polymarket.com")),
         chain_id=int(conn.get("chain_id", 137)),
         signature_type=int(conn.get("signature_type", 2)),
-        private_key=_env_optional("PRIVATE_KEY"),
+        private_key=_env_secret("PRIVATE_KEY"),
         funder_address=_env_optional("FUNDER_ADDRESS"),
+        polygon_rpc_url=_env_optional("POLYGON_RPC_URL"),
         live_send_enabled=_compute_live_send_enabled(),
     )
     exchange.validate()
@@ -134,6 +172,15 @@ class NothingHappensConfig:
     max_new_positions: int = -1
     shutdown_on_max_new_positions: bool = False
     redeemer_interval_sec: int = 1800
+    clob_rate_limit_rps: float = 5.0
+    clob_rate_limit_burst: float = 10.0
+    min_market_age_sec: float = 0.0
+    max_market_age_sec: float = float("inf")
+    min_market_age_pct: float = 0.0
+    max_market_age_pct: float = 1.0
+    min_time_remaining_sec: float = 3600.0
+    limit_order_max_age_sec: float = float("inf")
+    max_positions_per_category: int = -1
 
 
 def load_nothing_happens_config() -> tuple[ExchangeConfig, NothingHappensConfig]:
@@ -214,6 +261,44 @@ def _load_nothing_happens_config(
             "PM_NH_REDEEMER_INTERVAL_SEC",
             int(strat.get("redeemer_interval_sec", 1800)),
         ),
+        clob_rate_limit_rps=_env_float(
+            "PM_NH_CLOB_RATE_LIMIT_RPS",
+            float(strat.get("clob_rate_limit_rps", 5.0)),
+        ),
+        clob_rate_limit_burst=_env_float(
+            "PM_NH_CLOB_RATE_LIMIT_BURST",
+            float(strat.get("clob_rate_limit_burst", 10.0)),
+        ),
+        min_market_age_sec=_env_float(
+            "PM_NH_MIN_MARKET_AGE_SEC",
+            float(strat.get("min_market_age_sec", 0.0)),
+        ),
+        max_market_age_sec=(
+            _env_positive_float_or_inf("PM_NH_MAX_MARKET_AGE_SEC")
+            if os.getenv("PM_NH_MAX_MARKET_AGE_SEC", "").strip()
+            else _max_market_age_from_strategy(strat)
+        ),
+        min_market_age_pct=_env_float(
+            "PM_NH_MIN_MARKET_AGE_PCT",
+            float(strat.get("min_market_age_pct", 0.0)),
+        ),
+        max_market_age_pct=_env_float(
+            "PM_NH_MAX_MARKET_AGE_PCT",
+            float(strat.get("max_market_age_pct", 1.0)),
+        ),
+        min_time_remaining_sec=_env_float(
+            "PM_NH_MIN_TIME_REMAINING_SEC",
+            float(strat.get("min_time_remaining_sec", 3600.0)),
+        ),
+        limit_order_max_age_sec=(
+            _env_positive_float_or_inf("PM_NH_LIMIT_ORDER_MAX_AGE_SEC")
+            if os.getenv("PM_NH_LIMIT_ORDER_MAX_AGE_SEC", "").strip()
+            else _max_market_age_from_strategy({"max_market_age_sec": strat.get("limit_order_max_age_sec")})
+        ),
+        max_positions_per_category=_env_int(
+            "PM_NH_MAX_POSITIONS_PER_CATEGORY",
+            int(strat.get("max_positions_per_category", -1)),
+        ),
     )
     _validate_nothing_happens_config(strategy)
     return exchange, strategy
@@ -232,9 +317,9 @@ def _validate_nothing_happens_config(cfg: NothingHappensConfig) -> None:
         raise ValueError(
             f"position_sync_interval_sec must be >= 15, got {cfg.position_sync_interval_sec}"
         )
-    if cfg.order_dispatch_interval_sec < 15:
+    if cfg.order_dispatch_interval_sec < 5:
         raise ValueError(
-            f"order_dispatch_interval_sec must be >= 15, got {cfg.order_dispatch_interval_sec}"
+            f"order_dispatch_interval_sec must be >= 5, got {cfg.order_dispatch_interval_sec}"
         )
     if not (0 < cfg.cash_pct_per_trade <= 1.0):
         raise ValueError(
@@ -262,3 +347,23 @@ def _validate_nothing_happens_config(cfg: NothingHappensConfig) -> None:
         raise ValueError(f"max_new_positions must be >= -1, got {cfg.max_new_positions}")
     if cfg.redeemer_interval_sec < 60:
         raise ValueError(f"redeemer_interval_sec must be >= 60, got {cfg.redeemer_interval_sec}")
+    if cfg.max_market_age_sec != float("inf") and cfg.max_market_age_sec <= 0:
+        raise ValueError("max_market_age_sec must be positive or omitted (infinity)")
+    if cfg.clob_rate_limit_rps <= 0:
+        raise ValueError(f"clob_rate_limit_rps must be > 0, got {cfg.clob_rate_limit_rps}")
+    if cfg.clob_rate_limit_burst <= 0:
+        raise ValueError(f"clob_rate_limit_burst must be > 0, got {cfg.clob_rate_limit_burst}")
+    if cfg.min_market_age_sec < 0:
+        raise ValueError(f"min_market_age_sec must be >= 0, got {cfg.min_market_age_sec}")
+    if not (0.0 <= cfg.min_market_age_pct <= 1.0):
+        raise ValueError(f"min_market_age_pct must be in [0, 1.0], got {cfg.min_market_age_pct}")
+    if not (0.0 <= cfg.max_market_age_pct <= 1.0):
+        raise ValueError(f"max_market_age_pct must be in [0, 1.0], got {cfg.max_market_age_pct}")
+    if cfg.min_market_age_pct > cfg.max_market_age_pct:
+        raise ValueError("min_market_age_pct cannot be greater than max_market_age_pct")
+    if cfg.min_time_remaining_sec < 0:
+        raise ValueError(f"min_time_remaining_sec must be >= 0, got {cfg.min_time_remaining_sec}")
+    if cfg.limit_order_max_age_sec != float("inf") and cfg.limit_order_max_age_sec <= 0:
+        raise ValueError("limit_order_max_age_sec must be positive or omitted (infinity)")
+    if cfg.max_positions_per_category != -1 and cfg.max_positions_per_category < 1:
+        raise ValueError("max_positions_per_category must be -1 (unlimited) or >= 1")

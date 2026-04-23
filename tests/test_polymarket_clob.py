@@ -10,6 +10,12 @@ from bot.exchange.polymarket_clob import (
 )
 from bot.proxy_wallet import ensure_conditional_token_approvals
 from bot.models import LimitOrderIntent, MarketOrderIntent, Side
+from bot.secret_str import SecretStr
+
+
+@pytest.fixture(autouse=True)
+def _noop_polymarket_clob_rate_limit(monkeypatch):
+    monkeypatch.setattr(PolymarketClobExchangeClient, "_clob_acquire", lambda self: None)
 
 
 class _StubClobClient:
@@ -23,7 +29,7 @@ class _StubClobClient:
 
 def _make_client(trades=None) -> PolymarketClobExchangeClient:
     client = object.__new__(PolymarketClobExchangeClient)
-    client.private_key = "0xabc"
+    client.private_key = SecretStr("0xabc")
     client._trade_params = lambda asset_id, after=None: SimpleNamespace(asset_id=asset_id, after=after)
     client.client = _StubClobClient(trades=trades)
     return client
@@ -322,7 +328,7 @@ def test_bootstrap_live_trading_ensures_proxy_approval_and_syncs_cache(monkeypat
     monkeypatch.setattr(polymarket_clob, "ensure_conditional_token_approvals", _fake_ensure_conditional_token_approvals)
 
     client = object.__new__(PolymarketClobExchangeClient)
-    client.private_key = "0xabc"
+    client.private_key = SecretStr("0xabc")
     client.signature_type = 2
     client.funder_address = "0xfunder"
     client.chain_id = 137
@@ -342,7 +348,7 @@ def test_bootstrap_live_trading_ensures_proxy_approval_and_syncs_cache(monkeypat
 
 def test_bootstrap_live_trading_requires_polygon_rpc_for_proxy_wallet_mode() -> None:
     client = object.__new__(PolymarketClobExchangeClient)
-    client.private_key = "0xabc"
+    client.private_key = SecretStr("0xabc")
     client.signature_type = 2
     client.funder_address = "0xfunder"
     client.chain_id = 137

@@ -168,7 +168,11 @@ class PaperExchangeClient:
 
     def cancel_order(self, order_id: str) -> bool:
         self._open_orders = [o for o in self._open_orders if o.order_id != order_id]
+        self._orders_by_id.pop(order_id, None)
         return True
+
+    def get_all_open_orders(self) -> list[OpenOrder]:
+        return list(self._open_orders)
 
     def cancel_all(self) -> bool:
         self._open_orders.clear()

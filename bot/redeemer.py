@@ -31,8 +31,8 @@ logger = logging.getLogger(__name__)
 DATA_API_BASE = "https://data-api.polymarket.com"
 POSITIONS_ENDPOINT = f"{DATA_API_BASE}/positions"
 
-# Polymarket collateral: USDC.e on Polygon
-USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+# Polymarket collateral: pUSD on Polygon (V2)
+USDC_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 
 # Binary market index sets: outcome 0 -> bit 1, outcome 1 -> bit 2
 BINARY_INDEX_SETS = [1, 2]

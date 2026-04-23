@@ -43,11 +43,16 @@ def _validate_live_runtime(exchange_cfg, database_url: str | None) -> None:
         raise ValueError("DATABASE_URL is required when live order transmission is enabled")
 
 
-def _build_exchange(exchange_cfg):
+def _build_exchange(exchange_cfg, strategy_cfg):
     if exchange_cfg.live_send_enabled:
         from bot.exchange.polymarket_clob import PolymarketClobExchangeClient
 
-        return PolymarketClobExchangeClient(exchange_cfg, allow_trading=True)
+        return PolymarketClobExchangeClient(
+            exchange_cfg,
+            allow_trading=True,
+            clob_rate_limit_rps=strategy_cfg.clob_rate_limit_rps,
+            clob_rate_limit_burst=strategy_cfg.clob_rate_limit_burst,
+        )
     return PaperExchangeClient()
 
 
@@ -62,7 +67,7 @@ def _resolve_live_wallet_address(exchange_cfg) -> str | None:
     from eth_account import Account
 
     try:
-        return str(Account.from_key(exchange_cfg.private_key).address)
+        return str(Account.from_key(exchange_cfg.private_key.get_secret_value()).address)
     except Exception as exc:
         raise ValueError("Could not derive live wallet address from PRIVATE_KEY") from exc
 
@@ -71,7 +76,7 @@ def _patch_clob_http_timeout() -> None:
     """Increase py-clob-client's httpx read timeout from 5s to 12s."""
     try:
         import httpx
-        from py_clob_client.http_helpers import helpers
+        from py_clob_client_v2.http_helpers import helpers
 
         helpers._http_client = httpx.Client(
             http2=True,
@@ -115,7 +120,7 @@ async def run():
         },
     )
 
-    exchange = _build_exchange(exchange_cfg)
+    exchange = _build_exchange(exchange_cfg, strategy_cfg)
     portfolio_state = PortfolioState()
     nothing_happens_control = NothingHappensControlState()
     background_executor = ThreadPoolExecutor(
@@ -134,7 +139,7 @@ async def run():
         recovery.restore_risk_controller(risk, now_value_us=int(time.time() * 1_000_000))
 
     redeemer = None
-    rpc_url = (os.getenv("POLYGON_RPC_URL") or "").strip()
+    rpc_url = (exchange_cfg.polygon_rpc_url or "").strip()
     if (
         exchange_cfg.live_send_enabled
         and exchange_cfg.private_key
@@ -145,7 +150,7 @@ async def run():
         from bot.redeemer import Redeemer
 
         redeemer = Redeemer(
-            private_key=exchange_cfg.private_key,
+            private_key=exchange_cfg.private_key.get_secret_value(),
             proxy_address=exchange_cfg.funder_address,
             chain_id=exchange_cfg.chain_id,
             rpc_url=rpc_url,
@@ -176,7 +181,10 @@ async def run():
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, on_signal)
+        try:
+            loop.add_signal_handler(sig, on_signal)
+        except NotImplementedError:
+            pass  # add_signal_handler is not supported on Windows
 
     async with aiohttp.ClientSession() as session:
         if redeemer is not None:

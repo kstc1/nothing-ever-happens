@@ -139,3 +139,21 @@ def test_load_nothing_happens_config_requires_funder_for_proxy_wallets(
     monkeypatch.setenv("PRIVATE_KEY", "0xabc")
     with pytest.raises(ValueError, match="FUNDER_ADDRESS"):
         load_nothing_happens_config()
+
+
+def test_load_nothing_happens_config_requires_polygon_rpc_for_proxy_live(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "CONFIG_PATH",
+        _write_config(tmp_path, _base_config(connection={"signature_type": 2})),
+    )
+    monkeypatch.setenv("BOT_MODE", "live")
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+    monkeypatch.setenv("DRY_RUN", "false")
+    monkeypatch.setenv("PRIVATE_KEY", "0xabc")
+    monkeypatch.setenv("FUNDER_ADDRESS", "0x0000000000000000000000000000000000000001")
+    monkeypatch.delenv("POLYGON_RPC_URL", raising=False)
+    with pytest.raises(ValueError, match="POLYGON_RPC_URL"):
+        load_nothing_happens_config()

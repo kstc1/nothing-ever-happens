@@ -2,9 +2,10 @@ from unittest.mock import patch
 
 import pytest
 
-from bot.config import ExchangeConfig
+from bot.config import ExchangeConfig, NothingHappensConfig
 from bot.exchange.paper import PaperExchangeClient
 from bot.main import _build_exchange, _resolve_live_wallet_address, _validate_live_runtime
+from bot.secret_str import SecretStr
 
 
 def test_validate_live_runtime_requires_database_url():
@@ -12,7 +13,7 @@ def test_validate_live_runtime_requires_database_url():
         host="https://clob.polymarket.com",
         chain_id=137,
         signature_type=2,
-        private_key="0xabc",
+        private_key=SecretStr("0xabc"),
         funder_address="0xfunder",
         live_send_enabled=True,
     )
@@ -29,7 +30,8 @@ def test_build_exchange_uses_paper_client_when_live_send_disabled():
         funder_address=None,
         live_send_enabled=False,
     )
-    built = _build_exchange(exchange)
+    strategy = NothingHappensConfig()
+    built = _build_exchange(exchange, strategy)
     assert isinstance(built, PaperExchangeClient)
 
 
@@ -38,15 +40,21 @@ def test_build_exchange_uses_live_client_when_enabled():
         host="https://clob.polymarket.com",
         chain_id=137,
         signature_type=0,
-        private_key="0xabc",
+        private_key=SecretStr("0xabc"),
         funder_address=None,
         live_send_enabled=True,
     )
+    strategy = NothingHappensConfig()
     sentinel = object()
     with patch("bot.exchange.polymarket_clob.PolymarketClobExchangeClient", return_value=sentinel) as factory:
-        built = _build_exchange(exchange)
+        built = _build_exchange(exchange, strategy)
     assert built is sentinel
-    factory.assert_called_once_with(exchange, allow_trading=True)
+    factory.assert_called_once_with(
+        exchange,
+        allow_trading=True,
+        clob_rate_limit_rps=strategy.clob_rate_limit_rps,
+        clob_rate_limit_burst=strategy.clob_rate_limit_burst,
+    )
 
 
 def test_resolve_live_wallet_address_uses_signer_for_direct_eoa():
@@ -54,7 +62,7 @@ def test_resolve_live_wallet_address_uses_signer_for_direct_eoa():
         host="https://clob.polymarket.com",
         chain_id=137,
         signature_type=0,
-        private_key="0xabc",
+        private_key=SecretStr("0xabc"),
         funder_address=None,
         live_send_enabled=True,
     )

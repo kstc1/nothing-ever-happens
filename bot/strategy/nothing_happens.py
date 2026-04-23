@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from concurrent.futures import Executor
 from dataclasses import dataclass
@@ -14,14 +15,16 @@ from types import SimpleNamespace
 import aiohttp
 
 from bot.config import NothingHappensConfig
-from bot.models import MarketOrderIntent, OrderBookSnapshot, Side
+from bot.models import LimitOrderIntent, OrderBookSnapshot, Side
 from bot.nothing_happens_control import NothingHappensControlState
 from bot.order_status import normalize_order_status
 from bot.portfolio_state import PortfolioState, PositionSnapshot
-from bot.standalone_markets import StandaloneMarket, fetch_candidate_markets
+from bot.standalone_markets import StandaloneMarket, fetch_candidate_markets, fetch_markets_by_token_ids
 from bot.trade_ledger import record_order
 
 logger = logging.getLogger(__name__)
+
+LIMIT_ORDER_POLL_INTERVAL_SEC = 30
 
 DATA_API_BASE = "https://data-api.polymarket.com"
 POSITIONS_ENDPOINT = f"{DATA_API_BASE}/positions"
@@ -85,11 +88,14 @@ class PendingEntry:
     next_attempt_monotonic: float
     dispatch_failures: int = 0
     last_error: str = ""
+    order_id: str = ""
+    order_placed_at_ts: float = 0.0
+    last_partial_fill_reported: float = 0.0
 
 
 @dataclass(frozen=True)
 class EntryPlan:
-    no_ask: float
+    entry_price: float
     target_notional: float
 
 
@@ -98,6 +104,7 @@ class EntryAttemptResult:
     success: bool
     error: str = ""
     min_retry_delay_sec: float | None = None
+    open_limit_pending: bool = False
 
 
 async def _run_blocking(executor: Executor | None, fn, *args, **kwargs):
@@ -133,12 +140,9 @@ def _best_bid(book: OrderBookSnapshot) -> float:
     return max((level.price for level in book.bids), default=0.0)
 
 
-def _max_notional_within_price(book: OrderBookSnapshot, price_cap: float) -> float:
-    total = 0.0
-    for level in book.asks:
-        if level.price <= price_cap + 1e-9:
-            total += level.price * level.size
-    return total
+def _bid_depth_notional(book: OrderBookSnapshot) -> float:
+    """Total USD notional resting on the bid side (price * size per level)."""
+    return sum(level.size * level.price for level in book.bids)
 
 
 def _clamp_probability(price: float) -> float:
@@ -293,6 +297,7 @@ class NothingHappensRuntime:
     async def run(self) -> None:
         await self._refresh_markets()
         await self._sync_positions()
+        await self._sync_open_orders()
         self._initialize_target_open_positions()
         self._publish_portfolio()
 
@@ -301,6 +306,7 @@ class NothingHappensRuntime:
             asyncio.create_task(self._position_sync_loop(), name="nh_position_sync"),
             asyncio.create_task(self._price_loop(), name="nh_price_loop"),
             asyncio.create_task(self._order_dispatch_loop(), name="nh_order_dispatch"),
+            asyncio.create_task(self._open_order_poll_loop(), name="nh_order_poll"),
         ]
         try:
             await asyncio.gather(*tasks)
@@ -401,6 +407,69 @@ class NothingHappensRuntime:
         except asyncio.TimeoutError:
             return
 
+    def _market_in_entry_window(self, market: StandaloneMarket) -> bool:
+        """Return True if market age and time-to-resolution satisfy lifecycle config."""
+        now = time.time()
+
+        if market.created_at_ts > 0.0:
+            age_sec = now - market.created_at_ts
+            if age_sec < self.cfg.min_market_age_sec:
+                logger.debug(
+                    "lifecycle_gate_skip_too_new slug=%s age_sec=%.0f min=%.0f",
+                    market.slug,
+                    age_sec,
+                    self.cfg.min_market_age_sec,
+                )
+                return False
+            if not math.isinf(self.cfg.max_market_age_sec) and age_sec > self.cfg.max_market_age_sec:
+                logger.debug(
+                    "lifecycle_gate_skip_too_old slug=%s age_sec=%.0f max=%.0f",
+                    market.slug,
+                    age_sec,
+                    self.cfg.max_market_age_sec,
+                )
+                return False
+
+        if market.end_date_ts > 0.0:
+            remaining_sec = market.end_date_ts - now
+            if remaining_sec < self.cfg.min_time_remaining_sec:
+                logger.debug(
+                    "lifecycle_gate_skip_expiring slug=%s remaining_sec=%.0f min=%.0f",
+                    market.slug,
+                    remaining_sec,
+                    self.cfg.min_time_remaining_sec,
+                )
+                return False
+
+        if market.created_at_ts > 0.0 and market.end_date_ts > 0.0:
+            lifespan_sec = market.end_date_ts - market.created_at_ts
+            if lifespan_sec > 0:
+                age_sec = now - market.created_at_ts
+                age_pct = age_sec / lifespan_sec
+                if age_pct < self.cfg.min_market_age_pct:
+                    logger.debug(
+                        "lifecycle_gate_skip_too_new_pct slug=%s age_pct=%.3f min_pct=%.3f",
+                        market.slug,
+                        age_pct,
+                        self.cfg.min_market_age_pct,
+                    )
+                    return False
+                if age_pct > self.cfg.max_market_age_pct:
+                    logger.debug(
+                        "lifecycle_gate_skip_too_old_pct slug=%s age_pct=%.3f max_pct=%.3f",
+                        market.slug,
+                        age_pct,
+                        self.cfg.max_market_age_pct,
+                    )
+                    return False
+
+        if market.created_at_ts == 0.0:
+            logger.debug("lifecycle_gate_no_created_at slug=%s — age check skipped", market.slug)
+        if market.end_date_ts == 0.0:
+            logger.debug("lifecycle_gate_no_end_date slug=%s — remaining-time check skipped", market.slug)
+
+        return True
+
     async def _market_refresh_loop(self) -> None:
         while not self.shutdown_event.is_set():
             await self._refresh_markets()
@@ -428,7 +497,12 @@ class NothingHappensRuntime:
             await self._sleep_or_shutdown(max(0.0, self.cfg.price_poll_interval_sec - elapsed))
 
     async def _order_dispatch_loop(self) -> None:
+        # idle_poll_sec: sleep between scans when there is nothing to dispatch
         idle_poll_sec = min(5.0, max(1.0, self.cfg.order_dispatch_interval_sec / 6.0))
+        # fast_dispatch_sec: sleep between successive dispatches when a queue
+        # of unsubmitted pending entries is building up, so new markets are
+        # entered quickly rather than at most once per order_dispatch_interval_sec.
+        fast_dispatch_sec = min(2.0, self.cfg.order_dispatch_interval_sec)
         while not self.shutdown_event.is_set():
             cycle_started = time.time()
             attempted_order = False
@@ -441,11 +515,206 @@ class NothingHappensRuntime:
                 logger.exception("nothing_happens_order_dispatch_failed")
             self._publish_portfolio()
             elapsed = time.time() - cycle_started
-            if attempted_order:
+
+            # Count entries that are queued but have not yet been submitted to
+            # the exchange (no order_id). When the queue is non-empty we use
+            # the fast interval so the backlog clears in seconds, not minutes.
+            unsubmitted = sum(
+                1 for p in self._pending_entries_by_slug.values() if not p.order_id
+            )
+            if attempted_order and unsubmitted > 0:
+                sleep_for = max(0.0, fast_dispatch_sec - elapsed)
+            elif attempted_order:
                 sleep_for = max(0.0, self.cfg.order_dispatch_interval_sec - elapsed)
             else:
                 sleep_for = idle_poll_sec
             await self._sleep_or_shutdown(sleep_for)
+
+    async def _open_order_poll_loop(self) -> None:
+        """Poll pending GTC limit orders; confirm fills or cancel stale orders."""
+        loops = 0
+        while not self.shutdown_event.is_set():
+            try:
+                if loops % 4 == 0:
+                    await self._sync_open_orders()
+                loops += 1
+                await self._poll_open_limit_orders()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("nothing_happens_poll_loop_failed err=%s", exc)
+            await self._sleep_or_shutdown(LIMIT_ORDER_POLL_INTERVAL_SEC)
+
+    async def _poll_open_limit_orders(self) -> None:
+        """Poll all tracked GTC limit orders using a single bulk API call.
+
+        One call to get_all_open_orders() replaces N individual get_order()
+        calls, staying well within the rate limit budget. Orders that have
+        disappeared from the open-orders list (filled or cancelled) receive a
+        single targeted get_order() call to confirm their final status.
+        """
+        now_ts = time.time()
+
+        # Build lookup of order_id -> (slug, pending) for every tracked order.
+        tracked: dict[str, tuple[str, PendingEntry]] = {
+            pending.order_id: (slug, pending)
+            for slug, pending in list(self._pending_entries_by_slug.items())
+            if pending.order_id
+        }
+        if not tracked:
+            return
+
+        # Single bulk fetch: 1 API call regardless of how many orders we track.
+        try:
+            all_open = await asyncio.wait_for(
+                _run_blocking(self.background_executor, self.exchange.get_all_open_orders),
+                timeout=20.0,
+            )
+        except Exception as exc:
+            logger.warning("limit_order_bulk_poll_failed err=%s", exc)
+            return
+
+        open_by_id = {o.order_id: o for o in all_open}
+        logger.debug(
+            "limit_order_bulk_poll tracked=%d exchange_open=%d",
+            len(tracked),
+            len(all_open),
+        )
+
+        for order_id, (slug, pending) in tracked.items():
+            order = open_by_id.get(order_id)
+
+            if order is None:
+                # Not in open orders — likely filled or cancelled.
+                # Do one targeted lookup to get the final status.
+                try:
+                    order = await asyncio.wait_for(
+                        _run_blocking(self.background_executor, self.exchange.get_order, order_id),
+                        timeout=10.0,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "limit_order_poll_failed slug=%s order_id=%s err=%s",
+                        slug,
+                        order_id,
+                        exc,
+                    )
+                    continue
+
+            if order is None:
+                continue
+
+            status = normalize_order_status(order.status or "")
+
+            if status in {"cancelled", "canceled", "rejected", "failed"}:
+                self._pending_entries_by_slug.pop(slug, None)
+                logger.info("limit_order_closed slug=%s status=%s order_id=%s", slug, status, order_id)
+                continue
+
+            if status in {"matched", "filled"}:
+                market = self._markets_by_slug.get(slug, pending.market)
+                fill_price = order.price
+                size = (
+                    order.size_matched
+                    if order.size_matched is not None
+                    else (order.original_size or 0.0)
+                )
+                spent = fill_price * size if fill_price and size else 0.0
+                async with self._entry_lock:
+                    self._record_local_fill(
+                        market=market,
+                        size=size,
+                        avg_price=fill_price,
+                        initial_value=spent,
+                        current_price=fill_price,
+                        source="limit_fill",
+                    )
+                    record_order(
+                        action="buy",
+                        market_slug=slug,
+                        side="NO",
+                        token_id=market.no_token_id,
+                        amount=spent,
+                        reference_price=fill_price,
+                        order_id=order_id,
+                        order_status=status,
+                        question=market.question,
+                        shares=size,
+                    )
+                    self._pending_entries_by_slug.pop(slug, None)
+                logger.info(
+                    "limit_order_filled slug=%s price=%.4f size=%.4f",
+                    slug,
+                    fill_price,
+                    size,
+                )
+                continue
+
+            if order.size_matched is not None and order.size_matched > BALANCE_DUST_THRESHOLD:
+                market = self._markets_by_slug.get(slug, pending.market)
+                fill_price = order.price
+                total_matched = order.size_matched
+                delta = total_matched - pending.last_partial_fill_reported
+                if delta > BALANCE_DUST_THRESHOLD:
+                    size = delta
+                    spent = fill_price * size if fill_price and size else 0.0
+                    async with self._entry_lock:
+                        self._record_local_fill(
+                            market=market,
+                            size=size,
+                            avg_price=fill_price,
+                            initial_value=spent,
+                            current_price=fill_price,
+                            source="limit_partial_fill",
+                        )
+                        record_order(
+                            action="buy",
+                            market_slug=slug,
+                            side="NO",
+                            token_id=market.no_token_id,
+                            amount=spent,
+                            reference_price=fill_price,
+                            order_id=order_id,
+                            order_status="partial",
+                            question=market.question,
+                            shares=size,
+                        )
+                        pending.last_partial_fill_reported = total_matched
+                    logger.info(
+                        "limit_order_partial_fill slug=%s price=%.4f size=%.4f",
+                        slug,
+                        fill_price,
+                        size,
+                    )
+                continue
+
+            if pending.order_placed_at_ts and (now_ts - pending.order_placed_at_ts) > self.cfg.limit_order_max_age_sec:
+                cancel_success = False
+                try:
+                    cancel_success = await asyncio.wait_for(
+                        _run_blocking(
+                            self.background_executor,
+                            self.exchange.cancel_order,
+                            order_id,
+                        ),
+                        timeout=10.0,
+                    )
+                except Exception as exc:
+                    logger.warning("limit_order_cancel_failed slug=%s err=%s", slug, exc)
+
+                if cancel_success:
+                    self._pending_entries_by_slug.pop(slug, None)
+                    logger.info(
+                        "limit_order_cancelled_stale slug=%s order_id=%s",
+                        slug,
+                        order_id,
+                    )
+                else:
+                    logger.warning(
+                        "limit_order_cancel_api_failed slug=%s order_id=%s - keeping in pending to avoid duplicates",
+                        slug,
+                        order_id,
+                    )
 
     async def _refresh_markets(self) -> None:
         try:
@@ -462,9 +731,12 @@ class NothingHappensRuntime:
             for slug, value in self._market_in_range_by_slug.items()
             if slug in self._markets_by_slug
         }
-        for slug in list(self._pending_entries_by_slug):
+        for slug, pending in list(self._pending_entries_by_slug.items()):
             if slug not in self._markets_by_slug:
-                self._pending_entries_by_slug.pop(slug, None)
+                # Only drop pending entries if an order hasn't been placed yet.
+                # If an order is already live, we must not forget it even if the Gamma API drops the market.
+                if not pending.order_id:
+                    self._pending_entries_by_slug.pop(slug, None)
         self._last_market_refresh_ts = time.time()
         new_slugs = sorted(set(self._markets_by_slug) - previous)
         if new_slugs:
@@ -477,6 +749,94 @@ class NothingHappensRuntime:
             extra={"count": len(markets), "timestamp": self._last_market_refresh_ts},
         )
         self._publish_portfolio()
+
+    async def _sync_open_orders(self) -> None:
+        """Fetch all existing open orders on startup to avoid duplicating them."""
+        try:
+            if not hasattr(self.exchange, "get_all_open_orders"):
+                return
+            open_orders = await asyncio.wait_for(
+                _run_blocking(self.background_executor, self.exchange.get_all_open_orders),
+                timeout=20.0,
+            )
+            recovered_count = 0
+            missing_tokens = {}
+            for order in open_orders:
+                status = normalize_order_status(order.status or "")
+                if status not in {"open", "matched", "live", "active", "resting"}:
+                    continue
+                # Find matching market
+                found = False
+                for slug, market in self._markets_by_slug.items():
+                    if market.no_token_id == order.token_id:
+                        found = True
+                        if slug not in self._pending_entries_by_slug:
+                            self._pending_entries_by_slug[slug] = PendingEntry(
+                                market=market,
+                                enqueued_at_ts=time.time(),
+                                next_attempt_monotonic=asyncio.get_running_loop().time(),
+                                order_id=order.order_id,
+                                order_placed_at_ts=time.time(),
+                                last_partial_fill_reported=order.size_matched or 0.0,
+                            )
+                            recovered_count += 1
+                        else:
+                            pending = self._pending_entries_by_slug[slug]
+                            if not pending.order_id:
+                                pending.order_id = order.order_id
+                                pending.order_placed_at_ts = time.time()
+                                recovered_count += 1
+                            elif pending.order_id != order.order_id:
+                                logger.warning("duplicate_order_found slug=%s tracked=%s extra=%s - cancelling extra", slug, pending.order_id, order.order_id)
+                                self.background_executor.submit(self.exchange.cancel_order, order.order_id)
+                        break
+                
+                if not found:
+                    missing_tokens[order.token_id] = order
+
+            if missing_tokens:
+                logger.info("fetching_missing_markets_for_open_orders", extra={"missing_count": len(missing_tokens)})
+                try:
+                    missing_markets = await fetch_markets_by_token_ids(
+                        self.session,
+                        list(missing_tokens.keys()),
+                    )
+                    for market in missing_markets:
+                        order = missing_tokens.get(market.no_token_id)
+                        if not order:
+                            continue
+                        
+                        slug = market.slug
+                        self._markets_by_slug[slug] = market
+                        if slug not in self._pending_entries_by_slug:
+                            self._pending_entries_by_slug[slug] = PendingEntry(
+                                market=market,
+                                enqueued_at_ts=time.time(),
+                                next_attempt_monotonic=asyncio.get_running_loop().time(),
+                                order_id=order.order_id,
+                                order_placed_at_ts=time.time(),
+                                last_partial_fill_reported=order.size_matched or 0.0,
+                            )
+                            recovered_count += 1
+                        else:
+                            pending = self._pending_entries_by_slug[slug]
+                            if not pending.order_id:
+                                pending.order_id = order.order_id
+                                pending.order_placed_at_ts = time.time()
+                                recovered_count += 1
+                            elif pending.order_id != order.order_id:
+                                logger.warning("duplicate_order_found slug=%s tracked=%s extra=%s - cancelling extra", slug, pending.order_id, order.order_id)
+                                self.background_executor.submit(self.exchange.cancel_order, order.order_id)
+                except Exception as exc:
+                    logger.warning("failed_to_fetch_missing_markets: %s", exc)
+
+            if recovered_count > 0:
+                logger.info(
+                    "nothing_happens_recovered_open_orders",
+                    extra={"recovered_count": recovered_count},
+                )
+        except Exception as exc:
+            logger.warning("nothing_happens_sync_open_orders_failed: %s", exc)
 
     async def _sync_positions(self) -> None:
         now_ts = time.time()
@@ -517,8 +877,8 @@ class NothingHappensRuntime:
         self._positions_by_slug = positions_by_slug
         await self._refresh_recovery_state()
         self._initialize_target_open_positions()
-        for slug in list(self._pending_entries_by_slug):
-            if slug in self._positions_by_slug:
+        for slug, pending in list(self._pending_entries_by_slug.items()):
+            if slug in self._positions_by_slug and not pending.order_id:
                 self._pending_entries_by_slug.pop(slug, None)
         self._last_position_sync_ts = now_ts
 
@@ -607,6 +967,9 @@ class NothingHappensRuntime:
             )
 
     async def _evaluate_market(self, market: StandaloneMarket) -> None:
+        if not self._market_in_entry_window(market):
+            return
+
         async with self._book_semaphore:
             try:
                 book = await asyncio.wait_for(
@@ -618,8 +981,8 @@ class NothingHappensRuntime:
                 logger.warning("nothing_happens_book_fetch_failed slug=%s err=%s", market.slug, exc)
                 return
 
-        no_ask = _best_ask(book)
-        if no_ask <= 0 or no_ask > self.cfg.max_entry_price:
+        no_bid = _best_bid(book)
+        if no_bid <= 0 or no_bid > self.cfg.max_entry_price:
             self._market_in_range_by_slug[market.slug] = False
             self._schedule_backoff(market.slug, failed=False)
             return
@@ -644,6 +1007,16 @@ class NothingHappensRuntime:
                 self._schedule_backoff(market.slug, failed=False)
                 return
 
+            if not self._category_has_capacity(market.category):
+                logger.debug(
+                    "nothing_happens_category_cap_skip slug=%s category=%s limit=%d",
+                    market.slug,
+                    market.category,
+                    self.cfg.max_positions_per_category,
+                )
+                self._schedule_backoff(market.slug, failed=False)
+                return
+
             entry_plan = await self._build_entry_plan(market, book, enforce_risk=False)
             if entry_plan is None:
                 self._schedule_backoff(market.slug, failed=False)
@@ -651,9 +1024,9 @@ class NothingHappensRuntime:
 
             self._enqueue_pending_entry(market)
             logger.info(
-                "nothing_happens_entry_queued slug=%s ask=%.4f target=%.4f pending=%d",
+                "nothing_happens_entry_queued slug=%s bid=%.4f target=%.4f pending=%d",
                 market.slug,
-                entry_plan.no_ask,
+                entry_plan.entry_price,
                 entry_plan.target_notional,
                 len(self._pending_entries_by_slug),
             )
@@ -679,9 +1052,20 @@ class NothingHappensRuntime:
         market = self._markets_by_slug.get(slug, pending.market)
         pending.market = market
 
+        if not self._market_in_entry_window(market):
+            logger.info(
+                "lifecycle_gate_drop_pending slug=%s reason=outside_window",
+                pending.market.slug,
+            )
+            self._pending_entries_by_slug.pop(pending.market.slug, None)
+            return False
+
         if market.end_ts <= time.time():
             self._pending_entries_by_slug.pop(slug, None)
             self._schedule_backoff(slug, failed=False)
+            return False
+
+        if pending.order_id:
             return False
 
         async with self._entry_lock:
@@ -702,8 +1086,8 @@ class NothingHappensRuntime:
                 self._schedule_backoff(slug, failed=True)
                 return False
 
-        no_ask = _best_ask(book)
-        if no_ask <= 0 or no_ask > self.cfg.max_entry_price:
+        no_bid = _best_bid(book)
+        if no_bid <= 0 or no_bid > self.cfg.max_entry_price:
             self._pending_entries_by_slug.pop(slug, None)
             self._schedule_backoff(slug, failed=False)
             return False
@@ -724,8 +1108,12 @@ class NothingHappensRuntime:
                 self._schedule_backoff(slug, failed=False)
                 return False
 
-            result = await self._attempt_entry(market, book, entry_plan.no_ask, entry_plan.target_notional)
-            if result.success:
+            result = await self._attempt_entry(
+                market, book, entry_plan.entry_price, entry_plan.target_notional
+            )
+            if result.open_limit_pending:
+                pass
+            elif result.success:
                 self._pending_entries_by_slug.pop(slug, None)
             else:
                 self._reschedule_pending_entry(
@@ -806,13 +1194,14 @@ class NothingHappensRuntime:
         *,
         enforce_risk: bool,
     ) -> EntryPlan | None:
-        no_ask = _best_ask(book)
-        if no_ask <= 0 or no_ask > self.cfg.max_entry_price:
+        no_bid = _best_bid(book)
+        if no_bid <= 0 or no_bid > self.cfg.max_entry_price:
             return None
 
-        submitted_buy_price = self._submitted_buy_price(no_ask)
-        safe_notional = _max_notional_within_price(book, self.cfg.max_entry_price)
-        if safe_notional <= 0:
+        entry_price = no_bid
+        submitted_buy_price = entry_price
+        bid_depth = _bid_depth_notional(book)
+        if bid_depth < self.cfg.min_trade_amount:
             return None
 
         cash_balance = max(0.0, float(self._available_cash_balance() or 0.0))
@@ -834,12 +1223,12 @@ class NothingHappensRuntime:
             )
             return None
 
-        if safe_notional + 1e-9 < target_notional:
+        if bid_depth + 1e-9 < target_notional:
             logger.info(
-                "nothing_happens_depth_skip slug=%s ask=%.4f safe_notional=%.4f target=%.4f",
+                "nothing_happens_depth_skip slug=%s bid=%.4f bid_depth=%.4f target=%.4f",
                 market.slug,
-                no_ask,
-                safe_notional,
+                no_bid,
+                bid_depth,
                 target_notional,
             )
             return None
@@ -856,7 +1245,7 @@ class NothingHappensRuntime:
                 )
                 return None
 
-        return EntryPlan(no_ask=no_ask, target_notional=target_notional)
+        return EntryPlan(entry_price=entry_price, target_notional=target_notional)
 
     def _enqueue_pending_entry(self, market: StandaloneMarket) -> None:
         if market.slug in self._pending_entries_by_slug:
@@ -867,9 +1256,33 @@ class NothingHappensRuntime:
             next_attempt_monotonic=asyncio.get_running_loop().time(),
         )
 
+    def _category_has_capacity(self, category: str) -> bool:
+        """Return True if we can open another position in this market's category.
+
+        When max_positions_per_category <= 0 the limit is disabled.  An empty
+        category string is always allowed so uncategorised markets are never
+        incorrectly blocked.
+        """
+        limit = self.cfg.max_positions_per_category
+        if limit <= 0 or not category:
+            return True
+        cat = category.strip().lower()
+        count = 0
+        for slug in self._positions_by_slug:
+            market = self._markets_by_slug.get(slug)
+            if market and market.category.strip().lower() == cat:
+                count += 1
+        for slug, pending in self._pending_entries_by_slug.items():
+            market = self._markets_by_slug.get(slug, pending.market)
+            if market and market.category.strip().lower() == cat:
+                count += 1
+        return count < limit
+
     def _next_due_pending_entry(self) -> PendingEntry | None:
         loop_now = asyncio.get_running_loop().time()
         for pending in self._pending_entries_by_slug.values():
+            if pending.order_id:
+                continue
             if loop_now >= pending.next_attempt_monotonic:
                 return pending
         return None
@@ -905,7 +1318,7 @@ class NothingHappensRuntime:
         self,
         market: StandaloneMarket,
         book: OrderBookSnapshot,
-        no_ask: float,
+        entry_price: float,
         target_notional: float,
     ) -> EntryAttemptResult:
         try:
@@ -916,200 +1329,61 @@ class NothingHappensRuntime:
         except Exception:
             pass
 
-        for attempt in range(1, self.cfg.buy_retry_count + 1):
+        record_order(
+            action="attempt",
+            market_slug=market.slug,
+            side="NO",
+            token_id=market.no_token_id,
+            amount=target_notional,
+            reference_price=entry_price,
+            question=market.question,
+            attempt=1,
+        )
+        shares = target_notional / entry_price if entry_price > 0 else 0.0
+        if shares <= 0:
+            return EntryAttemptResult(success=False, error="invalid_entry_price")
+
+        try:
+            result = await asyncio.wait_for(
+                _run_blocking(
+                    self.background_executor,
+                    self.exchange.place_limit_order,
+                    LimitOrderIntent(
+                        token_id=market.no_token_id,
+                        side=Side.BUY,
+                        price=entry_price,
+                        size=round(shares, 6),
+                    ),
+                ),
+                timeout=25.0,
+            )
+        except Exception as exc:
             record_order(
-                action="attempt",
+                action="error",
                 market_slug=market.slug,
                 side="NO",
                 token_id=market.no_token_id,
                 amount=target_notional,
-                reference_price=no_ask,
+                reference_price=entry_price,
+                error=str(exc),
                 question=market.question,
-                attempt=attempt,
+                attempt=1,
             )
-            try:
-                result = await asyncio.wait_for(
-                    _run_blocking(
-                        self.background_executor,
-                        self.exchange.place_market_order,
-                        MarketOrderIntent(
-                            token_id=market.no_token_id,
-                            side=Side.BUY,
-                            amount=target_notional,
-                            reference_price=no_ask,
-                            allowed_slippage=self.cfg.allowed_slippage,
-                            price_cap=self.cfg.max_entry_price,
-                        ),
-                    ),
-                    timeout=25.0,
-                )
-            except Exception as exc:
-                if _is_definitive_no_fill_error(exc):
-                    record_order(
-                        action="error",
-                        market_slug=market.slug,
-                        side="NO",
-                        token_id=market.no_token_id,
-                        amount=target_notional,
-                        reference_price=no_ask,
-                        error=str(exc),
-                        question=market.question,
-                        attempt=attempt,
-                    )
-                    logger.warning(
-                        "nothing_happens_buy_rejected slug=%s attempt=%d err=%s",
-                        market.slug,
-                        attempt,
-                        exc,
-                    )
-                    if attempt < self.cfg.buy_retry_count:
-                        await self._sleep_or_shutdown(self.cfg.buy_retry_base_delay_sec * (2 ** (attempt - 1)))
-                    continue
-                recovered = await self._recover_balance_fill(market, target_notional)
-                if recovered:
-                    self._schedule_backoff(market.slug, failed=False)
-                    self._publish_portfolio()
-                    return EntryAttemptResult(success=True)
-                record_order(
-                    action="error",
-                    market_slug=market.slug,
-                    side="NO",
-                    token_id=market.no_token_id,
-                    amount=target_notional,
-                    reference_price=no_ask,
-                    error=str(exc),
-                    question=market.question,
-                    attempt=attempt,
-                )
-                logger.warning(
-                    "nothing_happens_buy_failed slug=%s attempt=%d err=%s",
-                    market.slug,
-                    attempt,
-                    exc,
-                )
-                logger.warning(
-                    "nothing_happens_buy_ambiguous_quarantined slug=%s retry_after_sync_sec=%.1f",
-                    market.slug,
-                    self._ambiguous_retry_delay_sec(),
-                )
-                await self._record_ambiguous_buy(
-                    market=market,
-                    target_notional=target_notional,
-                    reference_price=no_ask,
-                    error=str(exc),
-                )
-                return EntryAttemptResult(
-                    success=False,
-                    error="ambiguous_order_attempt_failed",
-                    min_retry_delay_sec=self._ambiguous_retry_delay_sec(),
-                )
-
-            raw = result.raw if isinstance(result.raw, dict) else {}
-            fill_price = _safe_float(raw.get("_fill_price") or raw.get("_market_price"), no_ask)
-            shares = _safe_float(raw.get("takingAmount"))
-            spent = _safe_float(raw.get("makingAmount"))
-            status = normalize_order_status(result.status or "")
-            if not _is_success_order_status(status) and shares <= BALANCE_DUST_THRESHOLD:
-                record_order(
-                    action="error",
-                    market_slug=market.slug,
-                    side="NO",
-                    token_id=market.no_token_id,
-                    amount=target_notional,
-                    reference_price=no_ask,
-                    order_id=result.order_id,
-                    order_status=result.status,
-                    error="buy_no_fill",
-                    question=market.question,
-                    attempt=attempt,
-                )
-                if _is_clean_no_fill_order_status(status):
-                    if attempt < self.cfg.buy_retry_count:
-                        await self._sleep_or_shutdown(self.cfg.buy_retry_base_delay_sec * (2 ** (attempt - 1)))
-                    continue
-                logger.warning(
-                    "nothing_happens_buy_status_ambiguous slug=%s status=%s retry_after_sync_sec=%.1f",
-                    market.slug,
-                    status,
-                    self._ambiguous_retry_delay_sec(),
-                )
-                await self._record_ambiguous_buy(
-                    market=market,
-                    target_notional=target_notional,
-                    reference_price=no_ask,
-                    error=f"buy_status_{status or 'unknown'}",
-                    order_id=str(result.order_id or ""),
-                )
-                return EntryAttemptResult(
-                    success=False,
-                    error=f"ambiguous_order_status:{status or 'unknown'}",
-                    min_retry_delay_sec=self._ambiguous_retry_delay_sec(),
-                )
-
-            if shares <= BALANCE_DUST_THRESHOLD and spent > 0.0 and fill_price > 0.0:
-                shares = spent / fill_price
-            if spent <= 0.0 and shares > BALANCE_DUST_THRESHOLD and fill_price > 0.0:
-                spent = shares * fill_price
-            if shares <= BALANCE_DUST_THRESHOLD or spent <= 0.0:
-                recovered = await self._recover_balance_fill(market, target_notional)
-                if recovered:
-                    self._schedule_backoff(market.slug, failed=False)
-                    self._publish_portfolio()
-                    return EntryAttemptResult(success=True)
-                logger.warning(
-                    "nothing_happens_buy_fill_data_ambiguous slug=%s status=%s retry_after_sync_sec=%.1f",
-                    market.slug,
-                    status or "unknown",
-                    self._ambiguous_retry_delay_sec(),
-                )
-                await self._record_ambiguous_buy(
-                    market=market,
-                    target_notional=target_notional,
-                    reference_price=fill_price if fill_price > 0 else no_ask,
-                    error=f"buy_missing_fill_data:{status or 'unknown'}",
-                    order_id=str(result.order_id or ""),
-                )
-                return EntryAttemptResult(
-                    success=False,
-                    error="ambiguous_fill_data_missing",
-                    min_retry_delay_sec=self._ambiguous_retry_delay_sec(),
-                )
-
-            spent_notional = spent if spent > 0 else target_notional
-            self._record_local_fill(
-                market=market,
-                size=shares,
-                avg_price=fill_price if fill_price > 0 else no_ask,
-                initial_value=spent_notional,
-                current_price=max(_best_bid(book), fill_price, no_ask),
-                source="live_fill",
-            )
-            record_order(
-                action="buy",
-                market_slug=market.slug,
-                side="NO",
-                token_id=market.no_token_id,
-                amount=spent_notional,
-                reference_price=fill_price if fill_price > 0 else no_ask,
-                order_id=result.order_id,
-                order_status=result.status,
-                question=market.question,
-                shares=shares,
-            )
-            logger.info(
-                "nothing_happens_buy slug=%s ask=%.4f fill=%.4f spent=%.4f shares=%.4f",
+            logger.warning(
+                "nothing_happens_limit_order_failed slug=%s err=%s",
                 market.slug,
-                no_ask,
-                fill_price,
-                spent if spent > 0 else target_notional,
-                shares,
+                exc,
+                exc_info=True,
             )
-            self._schedule_backoff(market.slug, failed=False)
-            self._publish_portfolio()
-            return EntryAttemptResult(success=True)
+            return EntryAttemptResult(success=False, error=str(exc))
 
-        self._schedule_backoff(market.slug, failed=True)
-        return EntryAttemptResult(success=False, error="order_attempt_failed")
+        if result and result.order_id:
+            if pending := self._pending_entries_by_slug.get(market.slug):
+                pending.order_id = str(result.order_id)
+                pending.order_placed_at_ts = time.time()
+            return EntryAttemptResult(success=False, open_limit_pending=True)
+
+        return EntryAttemptResult(success=False, error="limit_order_no_id")
 
     def _ambiguous_retry_delay_sec(self) -> float:
         return max(
@@ -1274,6 +1548,7 @@ class NothingHappensRuntime:
             current_price=avg_price,
             source="balance_recovery",
         )
+        self._pending_entries_by_slug.pop(market.slug, None)
         record_order(
             action="buy",
             market_slug=market.slug,
@@ -1334,7 +1609,7 @@ class NothingHappensRuntime:
     ) -> None:
         self._initialize_target_open_positions()
         notional = max(0.0, float(initial_value))
-        self._pending_entries_by_slug.pop(market.slug, None)
+        
         is_new_position = market.slug not in self._positions_by_slug and market.slug not in self._local_positions
         self._register_local_position(
             market=market,
@@ -1358,11 +1633,6 @@ class NothingHappensRuntime:
                 )
                 if self.cfg.shutdown_on_max_new_positions:
                     self.shutdown_event.set()
-
-    def _submitted_buy_price(self, reference_price: float) -> float:
-        if self.cfg.max_entry_price > 0:
-            return _clamp_probability(self.cfg.max_entry_price)
-        return _clamp_probability(reference_price + self.cfg.allowed_slippage)
 
     def _target_notional(
         self,

@@ -47,7 +47,7 @@ EXCLUDED_KEYWORDS = {
     "stablecoin",
     "memecoin",
     "altcoin",
-    "btc ",
+    "btc",
     "xrp",
     "bnb",
     " sol ",
@@ -150,6 +150,8 @@ class StandaloneMarket:
     end_ts: float
     category: str
     event_slug: str
+    created_at_ts: float = 0.0
+    end_date_ts: float = 0.0
 
 
 def _get_event_slug(market: dict) -> str:
@@ -198,7 +200,7 @@ def _is_excluded_category(market: dict) -> bool:
             if keyword in label:
                 return True
 
-    for field in ("groupItemTitle", "category", "question", "description"):
+    for field in ("slug", "groupItemTitle", "category", "question", "description"):
         value = (market.get(field) or "").lower()
         for keyword in EXCLUDED_KEYWORDS:
             if keyword in value:
@@ -302,6 +304,13 @@ def build_standalone_market(market: dict) -> StandaloneMarket | None:
         return None
     yes_price, no_price = _parse_probability_pair(market.get("outcomePrices"))
     end_date = str(market.get("endDate") or market.get("endDateIso") or "")
+    created_raw = str(
+        market.get("createdAt")
+        or market.get("created_at")
+        or market.get("createdTime")
+        or market.get("created")
+        or ""
+    )
     return StandaloneMarket(
         question=str(market.get("question") or ""),
         slug=str(market.get("slug") or ""),
@@ -317,6 +326,8 @@ def build_standalone_market(market: dict) -> StandaloneMarket | None:
         end_ts=_parse_iso_ts(end_date),
         category=str(market.get("groupItemTitle") or market.get("category") or ""),
         event_slug=_get_event_slug(market),
+        created_at_ts=_parse_iso_ts(created_raw),
+        end_date_ts=_parse_iso_ts(end_date),
     )
 
 
@@ -497,4 +508,55 @@ async def fetch_candidate_markets(
     markets.sort(key=lambda market: market.volume, reverse=True)
     gc.collect()
     _trim_process_memory()
+    return markets
+
+
+async def fetch_markets_by_token_ids(
+    session: aiohttp.ClientSession,
+    token_ids: list[str],
+) -> list[StandaloneMarket]:
+    if not token_ids:
+        return []
+    
+    markets: list[StandaloneMarket] = []
+    
+    # Chunk token IDs to avoid massive URLs (e.g. 50 at a time)
+    chunk_size = 50
+    for i in range(0, len(token_ids), chunk_size):
+        chunk = token_ids[i:i + chunk_size]
+        query_param = ",".join(chunk)
+        url = f"{GAMMA_API}/markets?clobTokenIds={query_param}"
+        
+        retries = 0
+        while retries < PAGE_MAX_RETRIES:
+            try:
+                async with session.get(url, headers={"User-Agent": "polymarket-scanner/1.0"}) as resp:
+                    resp.raise_for_status()
+                    batch = await resp.json()
+                    
+                    if isinstance(batch, list):
+                        for raw_market in batch:
+                            market = build_standalone_market(raw_market)
+                            if market is not None:
+                                markets.append(market)
+                    break # Success, break retry loop
+                    
+            except aiohttp.ClientResponseError as exc:
+                if exc.status == 429:
+                    retry_after = _parse_retry_after_seconds(exc.headers)
+                    delay = retry_after if retry_after is not None else min(
+                        PAGE_RETRY_BASE_DELAY_SEC * (2 ** retries),
+                        PAGE_RETRY_MAX_DELAY_SEC,
+                    )
+                    retries += 1
+                    logger.warning("gamma_markets_by_token_rate_limited retry=%d delay=%.2f", retries, delay)
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    logger.warning("gamma_markets_by_token_aborted status=%s err=%s", exc.status, exc)
+                    break
+            except Exception as exc:
+                logger.warning("gamma_markets_by_token_failed err=%s", exc)
+                break
+                
     return markets
