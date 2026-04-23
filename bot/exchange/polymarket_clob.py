@@ -546,7 +546,7 @@ class PolymarketClobExchangeClient:
             return False
         try:
             self._clob_acquire()
-            self.client.cancel(order_id)
+            self.client.cancel_order(order_id)
             return True
         except Exception as exc:
             logger.warning(
