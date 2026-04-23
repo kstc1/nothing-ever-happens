@@ -42,6 +42,7 @@ class PolymarketClobExchangeClient:
                 MarketOrderArgs,
                 OpenOrderParams,
                 OrderArgs,
+                OrderPayload,
                 OrderType,
                 TradeParams,
             )
@@ -545,8 +546,9 @@ class PolymarketClobExchangeClient:
         if not self.allow_trading:
             return False
         try:
+            from py_clob_client_v2.clob_types import OrderPayload
             self._clob_acquire()
-            self.client.cancel_order(order_id)
+            self.client.cancel_order(OrderPayload(orderID=order_id))
             return True
         except Exception as exc:
             logger.warning(
