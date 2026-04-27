@@ -718,7 +718,11 @@ class NothingHappensRuntime:
 
     async def _refresh_markets(self) -> None:
         try:
-            markets = await fetch_candidate_markets(self.session)
+            markets = await fetch_candidate_markets(
+                self.session,
+                excluded_keywords=self.cfg.excluded_keywords,
+                excluded_title_phrases=self.cfg.excluded_title_phrases,
+            )
         except Exception as exc:
             self._last_error = f"markets_refresh_failed: {exc}"
             logger.warning("nothing_happens_markets_refresh_failed: %s", exc)

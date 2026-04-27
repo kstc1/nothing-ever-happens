@@ -249,7 +249,8 @@ def test_filter_standalone_markets_excludes_nothing_ever_happens_titles() -> Non
                 "orderMinSize": "5",
                 "endDate": _FUTURE_END_DATE,
             },
-        ]
+        ],
+        excluded_title_phrases=frozenset(["nothing ever happens"]),
     )
 
     assert [market["slug"] for market in filtered] == ["will-it-rain"]

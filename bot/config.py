@@ -181,6 +181,8 @@ class NothingHappensConfig:
     min_time_remaining_sec: float = 3600.0
     limit_order_max_age_sec: float = float("inf")
     max_positions_per_category: int = -1
+    excluded_keywords: frozenset[str] = frozenset()
+    excluded_title_phrases: frozenset[str] = frozenset()
 
 
 def load_nothing_happens_config() -> tuple[ExchangeConfig, NothingHappensConfig]:
@@ -299,6 +301,8 @@ def _load_nothing_happens_config(
             "PM_NH_MAX_POSITIONS_PER_CATEGORY",
             int(strat.get("max_positions_per_category", -1)),
         ),
+        excluded_keywords=frozenset(str(k).lower() for k in strat.get("excluded_keywords", [])),
+        excluded_title_phrases=frozenset(str(p).lower() for p in strat.get("excluded_title_phrases", [])),
     )
     _validate_nothing_happens_config(strategy)
     return exchange, strategy
