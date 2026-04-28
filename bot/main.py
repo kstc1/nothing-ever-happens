@@ -91,10 +91,10 @@ async def run():
     configure_logging(os.getenv("LOG_LEVEL", "INFO"))
     _patch_clob_http_timeout()
 
-    exchange_cfg, strategy_cfg = load_nothing_happens_config()
+    exchange_cfg, strategy_cfg, deploy_cfg = load_nothing_happens_config()
     strategy_wallet_address = _resolve_live_wallet_address(exchange_cfg)
 
-    database_url = os.getenv("DATABASE_URL")
+    database_url = deploy_cfg.database_url
     _validate_live_runtime(exchange_cfg, database_url)
 
     if database_url:
@@ -159,7 +159,7 @@ async def run():
         )
         logger.info("redeemer_enabled")
 
-    dashboard_port = os.getenv("PORT") or os.getenv("DASHBOARD_PORT")
+    dashboard_port = deploy_cfg.dashboard_port
     dashboard_task = None
     if dashboard_port:
         from bot.dashboard import DashboardServer

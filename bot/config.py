@@ -60,21 +60,22 @@ def _env_float(name: str, default: float) -> float:
     return float(raw)
 
 
-def _compute_live_send_enabled() -> bool:
-    mode = os.getenv("BOT_MODE", "paper").strip().lower()
-    live_trading = _env_bool("LIVE_TRADING_ENABLED", False)
-    dry_run = _env_bool("DRY_RUN", True)
-    return mode == "live" and live_trading and not dry_run
+def _compute_live_send_enabled(deploy_cfg: "DeploymentConfig") -> bool:
+    return (
+        deploy_cfg.bot_mode.lower() == "live"
+        and deploy_cfg.live_trading_enabled
+        and not deploy_cfg.dry_run
+    )
 
 
 def _load_config_file() -> dict[str, Any]:
     path = os.getenv("CONFIG_PATH", "config.json")
     p = Path(path)
     if not p.exists():
-        raise FileNotFoundError(
-            f"Config file not found: {path}. "
-            f"Copy config.example.json to config.json and fill in your values."
+        logger.warning(
+            f"Config file not found at {path}. Using defaults and environment variables."
         )
+        return {}
     with p.open() as f:
         return json.load(f)
 
@@ -89,13 +90,11 @@ def _get_nothing_happens_section(cfg: dict[str, Any]) -> dict[str, Any]:
 
     strategies = cfg.get("strategies", {})
     if not isinstance(strategies, dict):
-        raise ValueError("config.json field 'strategies' must be an object")
+        return {}
 
     strategy_cfg = strategies.get(SUPPORTED_RUNTIME)
-    if strategy_cfg is None:
-        raise ValueError("Missing strategies.nothing_happens section in config.json")
-    if not isinstance(strategy_cfg, dict):
-        raise ValueError("strategies.nothing_happens must be an object")
+    if strategy_cfg is None or not isinstance(strategy_cfg, dict):
+        return {}
     return strategy_cfg
 
 
@@ -140,15 +139,24 @@ class ExchangeConfig:
             )
 
 
-def _build_exchange_config(conn: dict[str, Any]) -> ExchangeConfig:
+@dataclass(frozen=True)
+class DeploymentConfig:
+    bot_mode: str = "paper"
+    dry_run: bool = True
+    live_trading_enabled: bool = False
+    database_url: str | None = None
+    dashboard_port: int | None = None
+
+
+def _build_exchange_config(conn: dict[str, Any], deploy_cfg: DeploymentConfig) -> ExchangeConfig:
     exchange = ExchangeConfig(
         host=str(conn.get("host", "https://clob.polymarket.com")),
         chain_id=int(conn.get("chain_id", 137)),
         signature_type=int(conn.get("signature_type", 2)),
         private_key=_env_secret("PRIVATE_KEY"),
-        funder_address=_env_optional("FUNDER_ADDRESS"),
-        polygon_rpc_url=_env_optional("POLYGON_RPC_URL"),
-        live_send_enabled=_compute_live_send_enabled(),
+        funder_address=conn.get("funder_address") or _env_optional("FUNDER_ADDRESS"),
+        polygon_rpc_url=conn.get("polygon_rpc_url") or _env_optional("POLYGON_RPC_URL"),
+        live_send_enabled=_compute_live_send_enabled(deploy_cfg),
     )
     exchange.validate()
     return exchange
@@ -183,19 +191,41 @@ class NothingHappensConfig:
     max_positions_per_category: int = -1
 
 
-def load_nothing_happens_config() -> tuple[ExchangeConfig, NothingHappensConfig]:
+def load_nothing_happens_config() -> tuple[ExchangeConfig, NothingHappensConfig, DeploymentConfig]:
     return _load_nothing_happens_config(_load_config_file())
+
+
+def _load_deployment_config(deploy: dict[str, Any]) -> DeploymentConfig:
+    # Environment variables take precedence over config.json
+    return DeploymentConfig(
+        bot_mode=os.getenv("BOT_MODE") or str(deploy.get("bot_mode", "paper")),
+        dry_run=_env_bool("DRY_RUN", bool(deploy.get("dry_run", True))),
+        live_trading_enabled=_env_bool(
+            "LIVE_TRADING_ENABLED", bool(deploy.get("live_trading_enabled", False))
+        ),
+        database_url=os.getenv("DATABASE_URL") or deploy.get("database_url"),
+        dashboard_port=_env_int(
+            "DASHBOARD_PORT",
+            _env_int("PORT", int(deploy.get("dashboard_port", 8080)))
+        )
+    )
 
 
 def _load_nothing_happens_config(
     cfg: dict[str, Any],
-) -> tuple[ExchangeConfig, NothingHappensConfig]:
+) -> tuple[ExchangeConfig, NothingHappensConfig, DeploymentConfig]:
     conn = cfg.get("connection", {})
     if not isinstance(conn, dict):
         raise ValueError("config.json field 'connection' must be an object")
+
+    deploy_raw = cfg.get("deployment", {})
+    if not isinstance(deploy_raw, dict):
+        raise ValueError("config.json field 'deployment' must be an object")
+
+    deploy = _load_deployment_config(deploy_raw)
     strat = _get_nothing_happens_section(cfg)
 
-    exchange = _build_exchange_config(conn)
+    exchange = _build_exchange_config(conn, deploy)
     strategy = NothingHappensConfig(
         market_refresh_interval_sec=_env_int(
             "PM_NH_MARKET_REFRESH_INTERVAL_SEC",
@@ -301,7 +331,7 @@ def _load_nothing_happens_config(
         ),
     )
     _validate_nothing_happens_config(strategy)
-    return exchange, strategy
+    return exchange, strategy, deploy
 
 
 def _validate_nothing_happens_config(cfg: NothingHappensConfig) -> None:

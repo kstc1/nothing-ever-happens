@@ -2,7 +2,16 @@
   "connection": {
     "host": "https://clob.polymarket.com",
     "chain_id": 137,
-    "signature_type": 2
+    "signature_type": 2,
+    "funder_address": "0xb1c4fa3ada2AdcCbd1d07fe8c0A00300F8f3293d",
+    "polygon_rpc_url": "https://polygon-mainnet.g.alchemy.com/v2/r2_Qx7d7XhH2iX4t6z8u1q7p2q0k1x0"
+  },
+  "deployment": {
+    "bot_mode": "paper",
+    "dry_run": true,
+    "live_trading_enabled": false,
+    "database_url": null,
+    "dashboard_port": 8080
   },
   "strategies": {
     "nothing_happens": {
@@ -19,17 +28,17 @@
       "buy_retry_count": 3,
       "buy_retry_base_delay_sec": 1,
       "max_backoff_sec": 900,
-      "max_new_positions": -1,
+      "max_new_positions": 100,
       "shutdown_on_max_new_positions": false,
       "redeemer_interval_sec": 1800,
       "clob_rate_limit_rps": 5.0,
       "clob_rate_limit_burst": 10.0,
       "min_market_age_sec": 0,
       "max_market_age_sec": 0,
-      "min_market_age_pct": 0.0,
-      "max_market_age_pct": 1.0,
-      "min_time_remaining_sec": 3600,
-      "limit_order_max_age_sec": 0,
+      "min_market_age_pct": 0.05,
+      "max_market_age_pct": 0.59,
+      "min_time_remaining_sec": 605000,
+      "limit_order_max_age_sec": 43000,
       "max_positions_per_category": -1
     }
   }

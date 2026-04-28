@@ -52,7 +52,7 @@ def test_load_nothing_happens_config_rejects_unsupported_strategy_selector(
 
 def test_load_nothing_happens_config_defaults(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, _base_config()))
-    exchange, strategy = load_nothing_happens_config()
+    exchange, strategy, deploy = load_nothing_happens_config()
 
     assert exchange.host == "https://clob.polymarket.com"
     assert exchange.chain_id == 137
@@ -70,7 +70,7 @@ def test_load_nothing_happens_config_applies_env_overrides(tmp_path, monkeypatch
     monkeypatch.setenv("PM_NH_MAX_NEW_POSITIONS", "2")
     monkeypatch.setenv("PM_NH_SHUTDOWN_ON_MAX_NEW_POSITIONS", "true")
 
-    exchange, strategy = load_nothing_happens_config()
+    exchange, strategy, deploy = load_nothing_happens_config()
 
     assert exchange.host == "https://clob.polymarket.com"
     assert strategy.fixed_trade_amount == 5.0
@@ -98,7 +98,7 @@ def test_load_nothing_happens_config_accepts_negative_one_for_unbounded_position
     payload = _base_config(strategy_cfg={"max_new_positions": -1})
     monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
 
-    _, strategy = load_nothing_happens_config()
+    _, strategy, _ = load_nothing_happens_config()
 
     assert strategy.max_new_positions == -1
 
@@ -157,3 +157,42 @@ def test_load_nothing_happens_config_requires_polygon_rpc_for_proxy_live(
     monkeypatch.delenv("POLYGON_RPC_URL", raising=False)
     with pytest.raises(ValueError, match="POLYGON_RPC_URL"):
         load_nothing_happens_config()
+
+
+def test_load_nothing_happens_config_deployment_section(tmp_path, monkeypatch) -> None:
+    payload = _base_config()
+    payload["deployment"] = {
+        "bot_mode": "live",
+        "dry_run": False,
+        "live_trading_enabled": True,
+        "database_url": "postgresql://user:pass@localhost/db",
+        "dashboard_port": 9090,
+    }
+    monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
+    monkeypatch.setenv("PRIVATE_KEY", "0xabc")
+    monkeypatch.setenv("FUNDER_ADDRESS", "0x0000000000000000000000000000000000000001")
+    monkeypatch.setenv("POLYGON_RPC_URL", "http://localhost:8545")
+
+    _, _, deploy = load_nothing_happens_config()
+
+    assert deploy.bot_mode == "live"
+    assert deploy.dry_run is False
+    assert deploy.live_trading_enabled is True
+    assert deploy.database_url == "postgresql://user:pass@localhost/db"
+    assert deploy.dashboard_port == 9090
+
+
+def test_load_nothing_happens_config_env_overrides_deployment(tmp_path, monkeypatch) -> None:
+    payload = _base_config()
+    payload["deployment"] = {
+        "bot_mode": "paper",
+        "dashboard_port": 8080,
+    }
+    monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
+    monkeypatch.setenv("BOT_MODE", "live")
+    monkeypatch.setenv("DASHBOARD_PORT", "9999")
+
+    _, _, deploy = load_nothing_happens_config()
+
+    assert deploy.bot_mode == "live"
+    assert deploy.dashboard_port == 9999

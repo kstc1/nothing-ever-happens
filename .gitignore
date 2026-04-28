@@ -54,3 +54,5 @@ resolved_markets.json
 reconstruct_pnl_actual.csv
 *.parquet
 .claude/
+
+cache/
