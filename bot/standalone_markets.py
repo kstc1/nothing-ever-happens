@@ -30,106 +30,6 @@ PAGE_RETRY_BASE_DELAY_SEC = 1.0
 PAGE_RETRY_MAX_DELAY_SEC = 30.0
 GC_COLLECT_INTERVAL_PAGES = 20
 
-EXCLUDED_KEYWORDS = {
-    # Crypto
-    "crypto",
-    "cryptocurrency",
-    "bitcoin",
-    "ethereum",
-    "defi",
-    "nft",
-    "solana",
-    "polygon",
-    "blockchain",
-    "token launch",
-    "launch a token",
-    "airdrop",
-    "stablecoin",
-    "memecoin",
-    "altcoin",
-    "btc",
-    "xrp",
-    "bnb",
-    " sol ",
-    "cardano",
-    "dogecoin",
-    "doge",
-    # Finance
-    "finance",
-    "stocks",
-    "forex",
-    "commodities",
-    "fed rate",
-    "fed funds",
-    "interest rate",
-    "treasury",
-    "inflation",
-    "gdp",
-    "earnings",
-    "ipo",
-    "etf",
-    "s&p 500",
-    "s&p500",
-    "nasdaq",
-    "dow jones",
-    "ftse",
-    "bond yield",
-    "market cap",
-    "trading volume",
-    "up or down",
-    # Sports
-    "mlb",
-    "nba",
-    "nfl",
-    "nhl",
-    "baseball",
-    "basketball",
-    "football",
-    "hockey",
-    "soccer",
-    "mls",
-    "premier league",
-    "la liga",
-    "serie a",
-    "bundesliga",
-    "ligue 1",
-    "champions league",
-    "uefa",
-    "fifa",
-    "tennis",
-    "golf",
-    "pga",
-    "ufc",
-    "mma",
-    "boxing",
-    "f1",
-    "formula 1",
-    "nascar",
-    "cricket",
-    "ipl",
-    "rugby",
-    "olympics",
-    "world series",
-    "super bowl",
-    "march madness",
-    "stanley cup",
-    "world cup",
-    "ncaab",
-    "ncaa",
-    "college basketball",
-    "college football",
-    "table tennis",
-    "chess",
-    "pickleball",
-    "esports",
-    "e-sports",
-}
-
-EXCLUDED_TITLE_PHRASES = {
-    "nothing ever happens",
-}
-
-
 class GammaMarketFetchError(RuntimeError):
     pass
 
@@ -183,7 +83,9 @@ def _parse_iso_ts(value: str) -> float:
     return dt.timestamp()
 
 
-def _is_excluded_category(market: dict) -> bool:
+def _is_excluded_category(market: dict, excluded_keywords: frozenset[str]) -> bool:
+    if not excluded_keywords:
+        return False
     tags = market.get("tags") or []
     if isinstance(tags, str):
         try:
@@ -196,13 +98,13 @@ def _is_excluded_category(market: dict) -> bool:
             if isinstance(tag, dict)
             else str(tag).lower()
         )
-        for keyword in EXCLUDED_KEYWORDS:
+        for keyword in excluded_keywords:
             if keyword in label:
                 return True
 
     for field in ("slug", "groupItemTitle", "category", "question", "description"):
         value = (market.get(field) or "").lower()
-        for keyword in EXCLUDED_KEYWORDS:
+        for keyword in excluded_keywords:
             if keyword in value:
                 return True
     return False
@@ -216,10 +118,12 @@ def _is_binary_yes_no(market: dict) -> bool:
     return labels == {"yes", "no"}
 
 
-def _has_excluded_title_phrase(market: dict) -> bool:
+def _has_excluded_title_phrase(market: dict, excluded_title_phrases: frozenset[str]) -> bool:
+    if not excluded_title_phrases:
+        return False
     for field in ("question", "groupItemTitle"):
         value = str(market.get(field) or "").lower()
-        if any(phrase in value for phrase in EXCLUDED_TITLE_PHRASES):
+        if any(phrase in value for phrase in excluded_title_phrases):
             return True
     return False
 
@@ -258,14 +162,20 @@ def _is_sports_market(market: dict) -> bool:
     return False
 
 
-def _passes_candidate_filters(market: dict, *, max_end_date_months: int) -> bool:
+def _passes_candidate_filters(
+    market: dict,
+    *,
+    max_end_date_months: int,
+    excluded_keywords: frozenset[str],
+    excluded_title_phrases: frozenset[str],
+) -> bool:
     if not _is_binary_yes_no(market):
         return False
     if _is_sports_market(market):
         return False
-    if _has_excluded_title_phrase(market):
+    if _has_excluded_title_phrase(market, excluded_title_phrases):
         return False
-    if _is_excluded_category(market):
+    if _is_excluded_category(market, excluded_keywords):
         return False
     if not _ends_within_window(market, max_end_date_months=max_end_date_months):
         return False
@@ -437,6 +347,8 @@ def filter_standalone_markets(
     raw_markets: list[dict],
     *,
     max_end_date_months: int = DEFAULT_MAX_END_DATE_MONTHS,
+    excluded_keywords: frozenset[str] = frozenset(),
+    excluded_title_phrases: frozenset[str] = frozenset(),
 ) -> list[dict]:
     event_counts: Counter = Counter()
     for market in raw_markets:
@@ -447,6 +359,8 @@ def filter_standalone_markets(
         raw_markets,
         event_counts=event_counts,
         max_end_date_months=max_end_date_months,
+        excluded_keywords=excluded_keywords,
+        excluded_title_phrases=excluded_title_phrases,
     )
 
 
@@ -455,10 +369,17 @@ def filter_standalone_markets_with_event_counts(
     *,
     event_counts: Counter,
     max_end_date_months: int = DEFAULT_MAX_END_DATE_MONTHS,
+    excluded_keywords: frozenset[str] = frozenset(),
+    excluded_title_phrases: frozenset[str] = frozenset(),
 ) -> list[dict]:
     kept: list[dict] = []
     for market in raw_markets:
-        if not _passes_candidate_filters(market, max_end_date_months=max_end_date_months):
+        if not _passes_candidate_filters(
+            market,
+            max_end_date_months=max_end_date_months,
+            excluded_keywords=excluded_keywords,
+            excluded_title_phrases=excluded_title_phrases,
+        ):
             continue
         if not _is_standalone(market, event_counts):
             continue
@@ -470,6 +391,8 @@ async def fetch_candidate_markets(
     session: aiohttp.ClientSession,
     *,
     max_end_date_months: int = DEFAULT_MAX_END_DATE_MONTHS,
+    excluded_keywords: frozenset[str] = frozenset(),
+    excluded_title_phrases: frozenset[str] = frozenset(),
 ) -> list[StandaloneMarket]:
     markets: list[StandaloneMarket] = []
     standalone_candidates: dict[str, StandaloneMarket] = {}
@@ -482,7 +405,12 @@ async def fetch_candidate_markets(
             if event_slug:
                 event_counts[event_slug] += 1
 
-            if not _passes_candidate_filters(raw_market, max_end_date_months=max_end_date_months):
+            if not _passes_candidate_filters(
+                raw_market,
+                max_end_date_months=max_end_date_months,
+                excluded_keywords=excluded_keywords,
+                excluded_title_phrases=excluded_title_phrases,
+            ):
                 continue
             if raw_market.get("negRisk"):
                 continue
