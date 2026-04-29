@@ -502,8 +502,9 @@ async def test_dispatch_ambiguous_order_failure_quarantines_without_immediate_re
     pending = runtime._pending_entries_by_slug[market.slug]
     assert pending.dispatch_failures == 1
     assert "Request exception" in pending.last_error
-    # Requeue uses order_dispatch_interval_sec * 2^0 == 60s for first failure
-    assert pending.next_attempt_monotonic - asyncio.get_running_loop().time() >= 60.0
+    # Requeue uses order_dispatch_interval_sec * 2^0 == 60s for first failure.
+    # Allow a small scheduling margin because the assertion runs after requeueing.
+    assert pending.next_attempt_monotonic - asyncio.get_running_loop().time() >= 59.0
     assert market.slug not in runtime._positions_by_slug
     assert runtime._ambiguous_reserved_notional_by_slug == {}
     assert len(recovery.created) == 0
