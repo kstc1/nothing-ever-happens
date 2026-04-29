@@ -61,6 +61,52 @@ def test_load_nothing_happens_config_defaults(tmp_path, monkeypatch) -> None:
     assert strategy.fixed_trade_amount == 0.0
     assert strategy.max_entry_price == 0.65
     assert strategy.max_new_positions == -1
+    assert strategy.risk_config.max_total_open_exposure_usd == 1_500.0
+    assert strategy.risk_config.max_market_open_exposure_usd == 1_000.0
+
+
+def test_load_nothing_happens_config_parses_risk_section(tmp_path, monkeypatch) -> None:
+    payload = _base_config(
+        strategy_cfg={
+            "risk_config": {
+                "max_total_open_exposure_usd": 250.0,
+                "max_market_open_exposure_usd": 125.0,
+                "max_daily_drawdown_usd": 10.0,
+                "kill_switch_cooldown_sec": 30.0,
+                "drawdown_arm_after_sec": 15.0,
+                "drawdown_min_fresh_observations": 4,
+            }
+        }
+    )
+    monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
+
+    _, strategy, _ = load_nothing_happens_config()
+
+    assert strategy.risk_config.max_total_open_exposure_usd == 250.0
+    assert strategy.risk_config.max_market_open_exposure_usd == 125.0
+    assert strategy.risk_config.max_daily_drawdown_usd == 10.0
+    assert strategy.risk_config.kill_switch_cooldown_sec == 30.0
+    assert strategy.risk_config.drawdown_arm_after_sec == 15.0
+    assert strategy.risk_config.drawdown_min_fresh_observations == 4
+
+
+def test_load_nothing_happens_config_applies_risk_env_overrides(tmp_path, monkeypatch) -> None:
+    payload = _base_config(
+        strategy_cfg={
+            "risk_config": {
+                "max_total_open_exposure_usd": 250.0,
+                "max_market_open_exposure_usd": 125.0,
+            }
+        }
+    )
+    monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
+    monkeypatch.setenv("PM_RISK_MAX_TOTAL_OPEN_EXPOSURE_USD", "300")
+    monkeypatch.setenv("PM_RISK_MAX_MARKET_OPEN_EXPOSURE_USD", "150")
+
+    _, strategy, _ = load_nothing_happens_config()
+
+    assert strategy.risk_config.max_total_open_exposure_usd == 300.0
+    assert strategy.risk_config.max_market_open_exposure_usd == 150.0
 
 
 def test_load_nothing_happens_config_applies_env_overrides(tmp_path, monkeypatch) -> None:
@@ -88,6 +134,19 @@ def test_load_nothing_happens_config_validates_bounds(tmp_path, monkeypatch) -> 
     )
     monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
     with pytest.raises(ValueError, match="cash_pct_per_trade"):
+        load_nothing_happens_config()
+
+
+def test_load_nothing_happens_config_validates_risk_bounds(tmp_path, monkeypatch) -> None:
+    payload = _base_config(
+        strategy_cfg={
+            "risk_config": {
+                "max_total_open_exposure_usd": -1,
+            }
+        }
+    )
+    monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
+    with pytest.raises(ValueError, match="max_total_open_exposure_usd"):
         load_nothing_happens_config()
 
 

@@ -16,7 +16,7 @@ from bot.live_recovery import LiveRecoveryCoordinator
 from bot.logging_config import configure_logging
 from bot.nothing_happens_control import NothingHappensControlState
 from bot.portfolio_state import PortfolioState
-from bot.risk_controls import RiskConfig, RiskController
+from bot.risk_controls import RiskController
 from bot.strategy import nothing_happens
 
 logger = logging.getLogger(__name__)
@@ -86,12 +86,12 @@ def _patch_clob_http_timeout() -> None:
         logging.getLogger(__name__).warning("Failed to patch CLOB HTTP timeout: %s", exc)
 
 
-async def run():
+async def run(config_path: str | None = None):
     load_dotenv()
     configure_logging(os.getenv("LOG_LEVEL", "INFO"))
     _patch_clob_http_timeout()
 
-    exchange_cfg, strategy_cfg, deploy_cfg = load_nothing_happens_config()
+    exchange_cfg, strategy_cfg, deploy_cfg = load_nothing_happens_config(config_path)
     strategy_wallet_address = _resolve_live_wallet_address(exchange_cfg)
 
     database_url = deploy_cfg.database_url
@@ -117,6 +117,9 @@ async def run():
             "price_poll_interval_sec": strategy_cfg.price_poll_interval_sec,
             "market_refresh_interval_sec": strategy_cfg.market_refresh_interval_sec,
             "max_new_positions": strategy_cfg.max_new_positions,
+            "max_total_open_exposure_usd": strategy_cfg.risk_config.max_total_open_exposure_usd,
+            "max_market_open_exposure_usd": strategy_cfg.risk_config.max_market_open_exposure_usd,
+            "max_daily_drawdown_usd": strategy_cfg.risk_config.max_daily_drawdown_usd,
         },
     )
 
@@ -127,7 +130,7 @@ async def run():
         max_workers=max(4, int(os.getenv("PM_BACKGROUND_EXECUTOR_WORKERS", "8"))),
         thread_name_prefix="pm-bg",
     )
-    risk = RiskController(RiskConfig.from_env())
+    risk = RiskController(strategy_cfg.risk_config)
     recovery = (
         LiveRecoveryCoordinator(database_url, background_executor=background_executor)
         if exchange_cfg.live_send_enabled
@@ -141,7 +144,8 @@ async def run():
     redeemer = None
     rpc_url = (exchange_cfg.polygon_rpc_url or "").strip()
     if (
-        exchange_cfg.live_send_enabled
+        strategy_cfg.redeemer_enabled
+        and exchange_cfg.live_send_enabled
         and exchange_cfg.private_key
         and exchange_cfg.signature_type == 2
         and exchange_cfg.funder_address
@@ -369,8 +373,17 @@ async def run():
 
 
 def main():
+    import sys
+    config_path = None
+    if "--config" in sys.argv:
+        try:
+            idx = sys.argv.index("--config")
+            config_path = sys.argv[idx + 1]
+        except (IndexError, ValueError):
+            print("Error: --config requires a path argument", file=sys.stderr)
+            sys.exit(1)
     try:
-        asyncio.run(run())
+        asyncio.run(run(config_path))
     except KeyboardInterrupt:
         pass
 

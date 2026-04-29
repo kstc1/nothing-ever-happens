@@ -1199,7 +1199,7 @@ class NothingHappensRuntime:
         enforce_risk: bool,
     ) -> EntryPlan | None:
         no_bid = _best_bid(book)
-        if no_bid <= 0 or no_bid > self.cfg.max_entry_price:
+        if no_bid <= 0 or no_bid < self.cfg.min_entry_price or no_bid > self.cfg.max_entry_price:
             return None
 
         entry_price = no_bid

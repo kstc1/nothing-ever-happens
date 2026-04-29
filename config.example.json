@@ -19,9 +19,10 @@
       "price_poll_interval_sec": 60,
       "position_sync_interval_sec": 60,
       "order_dispatch_interval_sec": 60,
-      "cash_pct_per_trade": 0.01,
+      "cash_pct_per_trade": 0.005,
       "min_trade_amount": 5,
       "fixed_trade_amount": 0,
+      "min_entry_price": 0.0,
       "max_entry_price": 0.95,
       "allowed_slippage": 0.3,
       "request_concurrency": 4,
@@ -40,6 +41,14 @@
       "min_time_remaining_sec": 605000,
       "limit_order_max_age_sec": 43000,
       "max_positions_per_category": -1,
+      "risk_config": {
+        "max_total_open_exposure_usd": 1500.0,
+        "max_market_open_exposure_usd": 1000.0,
+        "max_daily_drawdown_usd": 0.0,
+        "kill_switch_cooldown_sec": 900.0,
+        "drawdown_arm_after_sec": 1800.0,
+        "drawdown_min_fresh_observations": 3
+      },
       "tradable_keywords": [
         "crypto",
         "cryptocurrency",

@@ -78,6 +78,45 @@ The runtime config lives under `strategies.nothing_happens`. See [config.example
 | `buy_retry_base_delay_sec` | The base backoff delay between failed buy order attempts (in seconds). |
 | `max_backoff_sec` | The absolute maximum time the bot will wait before re-checking a market that previously caused errors (in seconds). |
 | `max_new_positions` | The maximum number of *new* positions the bot is allowed to open while running. Set to `-1` for unlimited. |
+| |
+
+## Additional Config Fields
+
+These fields were recently added and are now supported in `config.json` (they can also be overridden via environment variables):
+
+- `min_entry_price`: Lower bound for candidate entry prices (float, 0.0 - 1.0). Defaults to `0.0`. Use `PM_NH_MIN_ENTRY_PRICE` to override via environment.
+
+- `redeemer_enabled`: Enable/disable the background redeemer task (boolean, default `true`). Use `PM_NH_REDEEMER_ENABLED` to override via environment.
+
+- `risk_config`: Object grouping risk-related limits. Example:
+
+```json
+"risk_config": {
+	"max_total_open_exposure_usd": 1500.0,
+	"max_market_open_exposure_usd": 1000.0,
+	"max_daily_drawdown_usd": 0.0,
+	"kill_switch_cooldown_sec": 900.0,
+	"drawdown_arm_after_sec": 1800.0,
+	"drawdown_min_fresh_observations": 3
+}
+```
+
+Each `risk_config` field may be overridden with the corresponding `PM_RISK_...` environment variable (see `config.example.json`).
+
+### CLI and Environment Overrides
+
+You can pass a custom config path with the `--config` flag or by setting the `CONFIG_PATH` environment variable. Environment variables take precedence over values in `config.json`.
+
+Examples:
+
+```bash
+# Use a custom config file
+python -m bot.main --config /path/to/config-prod.json
+
+# Override a single value with an environment variable
+PM_NH_MAX_ENTRY_PRICE=0.8 python -m bot.main --config /path/to/config-prod.json
+```
+
 | `shutdown_on_max_new_positions` | If `true`, the bot will completely exit/stop running once `max_new_positions` is reached. |
 | `redeemer_interval_sec` | How often the background redeemer task checks for winning positions to cash out (in seconds). |
 | `clob_rate_limit_rps` | The maximum number of requests per second allowed to the CLOB exchange API. |
@@ -123,6 +162,41 @@ heroku ps:scale web=1 worker=0 -a "$HEROKU_APP_NAME"
 ```
 
 Only run the `web` dyno. The `worker` entry exists only to fail fast if it is started accidentally.
+
+## VPS Deployment
+
+For production deployment on a fresh Ubuntu/Debian server:
+
+```bash
+git clone <repo> && cd nothing-ever-happens
+bash scripts/vps/deploy.sh
+```
+
+This automated script:
+1. ✅ Sets up PostgreSQL database
+2. ✅ Installs Python 3.11+ and dependencies
+3. ✅ Creates application user and directories
+4. ✅ Validates configuration
+5. ✅ Tests in dry-run mode
+6. ✅ Installs systemd service
+7. ✅ Starts bot with monitoring
+
+**See [scripts/vps/README.md](scripts/vps/README.md) for:**
+- Step-by-step manual setup
+- Individual script descriptions
+- Configuration reference
+- Health monitoring
+- Troubleshooting guide
+- Security best practices
+
+**Management commands:**
+```bash
+sudo systemctl start nothing-happens-bot       # Start
+sudo systemctl stop nothing-happens-bot        # Stop
+sudo systemctl status nothing-happens-bot      # Status
+sudo journalctl -u nothing-happens-bot -f      # View logs
+bash scripts/vps/health_check.sh               # Health check
+```
 
 ## Tests
 
