@@ -2,16 +2,7 @@
   "connection": {
     "host": "https://clob.polymarket.com",
     "chain_id": 137,
-    "signature_type": 2,
-    "funder_address": "0xb1c4fa3ada2AdcCbd1d07fe8c0A00300F8f3293d",
-    "polygon_rpc_url": "https://polygon-mainnet.g.alchemy.com/v2/r2_Qx7d7XhH2iX4t6z8u1q7p2q0k1x0"
-  },
-  "deployment": {
-    "bot_mode": "paper",
-    "dry_run": true,
-    "live_trading_enabled": false,
-    "database_url": null,
-    "dashboard_port": 8080
+    "signature_type": 2
   },
   "strategies": {
     "nothing_happens": {
@@ -19,36 +10,28 @@
       "price_poll_interval_sec": 60,
       "position_sync_interval_sec": 60,
       "order_dispatch_interval_sec": 60,
-      "cash_pct_per_trade": 0.005,
+      "portfolio_pct_per_trade": 0.01,
       "min_trade_amount": 5,
       "fixed_trade_amount": 0,
-      "min_entry_price": 0.0,
       "max_entry_price": 0.95,
       "allowed_slippage": 0.3,
       "request_concurrency": 4,
       "buy_retry_count": 3,
       "buy_retry_base_delay_sec": 1,
       "max_backoff_sec": 900,
-      "max_new_positions": 100,
+      "max_new_positions": -1,
       "shutdown_on_max_new_positions": false,
+      "auto_redeem_enabled": false,
       "redeemer_interval_sec": 1800,
       "clob_rate_limit_rps": 5.0,
       "clob_rate_limit_burst": 10.0,
       "min_market_age_sec": 0,
       "max_market_age_sec": 0,
-      "min_market_age_pct": 0.05,
-      "max_market_age_pct": 0.59,
-      "min_time_remaining_sec": 605000,
-      "limit_order_max_age_sec": 43000,
+      "min_market_age_pct": 0.0,
+      "max_market_age_pct": 1.0,
+      "min_time_remaining_sec": 3600,
+      "limit_order_max_age_sec": 0,
       "max_positions_per_category": -1,
-      "risk_config": {
-        "max_total_open_exposure_usd": 1500.0,
-        "max_market_open_exposure_usd": 1000.0,
-        "max_daily_drawdown_usd": 0.0,
-        "kill_switch_cooldown_sec": 900.0,
-        "drawdown_arm_after_sec": 1800.0,
-        "drawdown_min_fresh_observations": 3
-      },
       "tradable_keywords": [
         "crypto",
         "cryptocurrency",

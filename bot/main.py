@@ -16,7 +16,7 @@ from bot.live_recovery import LiveRecoveryCoordinator
 from bot.logging_config import configure_logging
 from bot.nothing_happens_control import NothingHappensControlState
 from bot.portfolio_state import PortfolioState
-from bot.risk_controls import RiskController
+from bot.risk_controls import RiskConfig, RiskController
 from bot.strategy import nothing_happens
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,22 @@ def _record_supervisor_event(action: str, **extra) -> None:
             amount=0,
             **extra,
         )
+    except Exception:
+        pass
+
+    try:
+        from bot.telegram_notifier import send_telegram_message
+        import asyncio
+        if "error" in extra:
+            msg = f"⚠️ <b>{action}</b>\nError: {extra['error']}"
+            if "feed" in extra:
+                msg += f"\nFeed: {extra['feed']}"
+            asyncio.create_task(send_telegram_message(msg))
+        elif action in ("feed_dead", "feed_crashed"):
+            msg = f"⚠️ <b>{action}</b>"
+            if "feed" in extra:
+                msg += f"\nFeed: {extra['feed']}"
+            asyncio.create_task(send_telegram_message(msg))
     except Exception:
         pass
 
@@ -86,15 +102,15 @@ def _patch_clob_http_timeout() -> None:
         logging.getLogger(__name__).warning("Failed to patch CLOB HTTP timeout: %s", exc)
 
 
-async def run(config_path: str | None = None):
+async def run():
     load_dotenv()
     configure_logging(os.getenv("LOG_LEVEL", "INFO"))
     _patch_clob_http_timeout()
 
-    exchange_cfg, strategy_cfg, deploy_cfg = load_nothing_happens_config(config_path)
+    exchange_cfg, strategy_cfg = load_nothing_happens_config()
     strategy_wallet_address = _resolve_live_wallet_address(exchange_cfg)
 
-    database_url = deploy_cfg.database_url
+    database_url = os.getenv("DATABASE_URL")
     _validate_live_runtime(exchange_cfg, database_url)
 
     if database_url:
@@ -110,16 +126,13 @@ async def run(config_path: str | None = None):
             "chain_id": exchange_cfg.chain_id,
             "signature_type": exchange_cfg.signature_type,
             "live_send_enabled": exchange_cfg.live_send_enabled,
-            "cash_pct_per_trade": strategy_cfg.cash_pct_per_trade,
+            "portfolio_pct_per_trade": strategy_cfg.portfolio_pct_per_trade,
             "min_trade_amount": strategy_cfg.min_trade_amount,
             "max_entry_price": strategy_cfg.max_entry_price,
             "allowed_slippage": strategy_cfg.allowed_slippage,
             "price_poll_interval_sec": strategy_cfg.price_poll_interval_sec,
             "market_refresh_interval_sec": strategy_cfg.market_refresh_interval_sec,
             "max_new_positions": strategy_cfg.max_new_positions,
-            "max_total_open_exposure_usd": strategy_cfg.risk_config.max_total_open_exposure_usd,
-            "max_market_open_exposure_usd": strategy_cfg.risk_config.max_market_open_exposure_usd,
-            "max_daily_drawdown_usd": strategy_cfg.risk_config.max_daily_drawdown_usd,
         },
     )
 
@@ -130,7 +143,7 @@ async def run(config_path: str | None = None):
         max_workers=max(4, int(os.getenv("PM_BACKGROUND_EXECUTOR_WORKERS", "8"))),
         thread_name_prefix="pm-bg",
     )
-    risk = RiskController(strategy_cfg.risk_config)
+    risk = RiskController(RiskConfig.from_env())
     recovery = (
         LiveRecoveryCoordinator(database_url, background_executor=background_executor)
         if exchange_cfg.live_send_enabled
@@ -144,8 +157,8 @@ async def run(config_path: str | None = None):
     redeemer = None
     rpc_url = (exchange_cfg.polygon_rpc_url or "").strip()
     if (
-        strategy_cfg.redeemer_enabled
-        and exchange_cfg.live_send_enabled
+        exchange_cfg.live_send_enabled
+        and strategy_cfg.auto_redeem_enabled
         and exchange_cfg.private_key
         and exchange_cfg.signature_type == 2
         and exchange_cfg.funder_address
@@ -163,7 +176,7 @@ async def run(config_path: str | None = None):
         )
         logger.info("redeemer_enabled")
 
-    dashboard_port = deploy_cfg.dashboard_port
+    dashboard_port = os.getenv("PORT") or os.getenv("DASHBOARD_PORT")
     dashboard_task = None
     if dashboard_port:
         from bot.dashboard import DashboardServer
@@ -367,23 +380,19 @@ async def run(config_path: str | None = None):
         for (name, _), result in zip(tasks.items(), results):
             if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
                 logger.error("task_error_on_shutdown", extra={"task": name, "error": str(result)})
+                try:
+                    from bot.telegram_notifier import send_telegram_message
+                    await send_telegram_message(f"⚠️ <b>Task Error on Shutdown</b>\nTask: {name}\nError: {str(result)}")
+                except Exception:
+                    pass
 
     background_executor.shutdown(wait=True, cancel_futures=False)
     logger.info("shutdown_complete")
 
 
 def main():
-    import sys
-    config_path = None
-    if "--config" in sys.argv:
-        try:
-            idx = sys.argv.index("--config")
-            config_path = sys.argv[idx + 1]
-        except (IndexError, ValueError):
-            print("Error: --config requires a path argument", file=sys.stderr)
-            sys.exit(1)
     try:
-        asyncio.run(run(config_path))
+        asyncio.run(run())
     except KeyboardInterrupt:
         pass
 

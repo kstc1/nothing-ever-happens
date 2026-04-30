@@ -57,7 +57,7 @@ def test_load_nothing_happens_config_defaults(tmp_path, monkeypatch) -> None:
     assert exchange.host == "https://clob.polymarket.com"
     assert exchange.chain_id == 137
     assert strategy.market_refresh_interval_sec == 600
-    assert strategy.cash_pct_per_trade == 0.02
+    assert strategy.portfolio_pct_per_trade == 0.02
     assert strategy.fixed_trade_amount == 0.0
     assert strategy.max_entry_price == 0.65
     assert strategy.max_new_positions == -1
@@ -128,12 +128,12 @@ def test_load_nothing_happens_config_applies_env_overrides(tmp_path, monkeypatch
 def test_load_nothing_happens_config_validates_bounds(tmp_path, monkeypatch) -> None:
     payload = _base_config(
         strategy_cfg={
-            "cash_pct_per_trade": 0,
+            "portfolio_pct_per_trade": 0,
             "max_entry_price": 1.2,
         }
     )
     monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
-    with pytest.raises(ValueError, match="cash_pct_per_trade"):
+    with pytest.raises(ValueError, match="portfolio_pct_per_trade"):
         load_nothing_happens_config()
 
 
