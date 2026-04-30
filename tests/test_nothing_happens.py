@@ -895,14 +895,14 @@ def test_max_new_positions_negative_one_is_unbounded() -> None:
 def test_target_notional_uses_fixed_trade_amount_when_configured() -> None:
     runtime = _make_runtime(
         cfg=NothingHappensConfig(
-            cash_pct_per_trade=0.5,
+            portfolio_pct_per_trade=0.5,
             min_trade_amount=5.0,
             fixed_trade_amount=5.0,
         )
     )
 
     target_notional = runtime._target_notional(
-        cash_balance=100.0,
+        portfolio_value=100.0,
         submitted_price=0.5,
         market_min_order_size=1.0,
         book_min_order_size=1.0,
@@ -914,14 +914,14 @@ def test_target_notional_uses_fixed_trade_amount_when_configured() -> None:
 def test_target_notional_converts_share_minimums_to_usd() -> None:
     runtime = _make_runtime(
         cfg=NothingHappensConfig(
-            cash_pct_per_trade=0.01,
+            portfolio_pct_per_trade=0.01,
             min_trade_amount=5.0,
             fixed_trade_amount=0.0,
         )
     )
 
     target_notional = runtime._target_notional(
-        cash_balance=100.0,
+        portfolio_value=100.0,
         submitted_price=0.5,
         market_min_order_size=20.0,
         book_min_order_size=10.0,

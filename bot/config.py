@@ -160,7 +160,7 @@ class NothingHappensConfig:
     price_poll_interval_sec: int = 60
     position_sync_interval_sec: int = 60
     order_dispatch_interval_sec: int = 60
-    cash_pct_per_trade: float = 0.02
+    portfolio_pct_per_trade: float = 0.02
     min_trade_amount: float = 5.0
     fixed_trade_amount: float = 0.0
     max_entry_price: float = 0.65
@@ -171,6 +171,7 @@ class NothingHappensConfig:
     max_backoff_sec: float = 900.0
     max_new_positions: int = -1
     shutdown_on_max_new_positions: bool = False
+    auto_redeem_enabled: bool = True
     redeemer_interval_sec: int = 1800
     clob_rate_limit_rps: float = 5.0
     clob_rate_limit_burst: float = 10.0
@@ -215,9 +216,9 @@ def _load_nothing_happens_config(
             "PM_NH_ORDER_DISPATCH_INTERVAL_SEC",
             int(strat.get("order_dispatch_interval_sec", 60)),
         ),
-        cash_pct_per_trade=_env_float(
-            "PM_NH_CASH_PCT_PER_TRADE",
-            float(strat.get("cash_pct_per_trade", 0.02)),
+        portfolio_pct_per_trade=_env_float(
+            "PM_NH_PORTFOLIO_PCT_PER_TRADE",
+            float(strat.get("portfolio_pct_per_trade", 0.02)),
         ),
         min_trade_amount=_env_float(
             "PM_NH_MIN_TRADE_AMOUNT",
@@ -258,6 +259,10 @@ def _load_nothing_happens_config(
         shutdown_on_max_new_positions=_env_bool(
             "PM_NH_SHUTDOWN_ON_MAX_NEW_POSITIONS",
             bool(strat.get("shutdown_on_max_new_positions", False)),
+        ),
+        auto_redeem_enabled=_env_bool(
+            "PM_NH_AUTO_REDEEM_ENABLED",
+            bool(strat.get("auto_redeem_enabled", True)),
         ),
         redeemer_interval_sec=_env_int(
             "PM_NH_REDEEMER_INTERVAL_SEC",
@@ -325,9 +330,9 @@ def _validate_nothing_happens_config(cfg: NothingHappensConfig) -> None:
         raise ValueError(
             f"order_dispatch_interval_sec must be >= 5, got {cfg.order_dispatch_interval_sec}"
         )
-    if not (0 < cfg.cash_pct_per_trade <= 1.0):
+    if not (0 < cfg.portfolio_pct_per_trade <= 1.0):
         raise ValueError(
-            f"cash_pct_per_trade must be in (0, 1.0], got {cfg.cash_pct_per_trade}"
+            f"portfolio_pct_per_trade must be in (0, 1.0], got {cfg.portfolio_pct_per_trade}"
         )
     if cfg.min_trade_amount <= 0:
         raise ValueError(f"min_trade_amount must be > 0, got {cfg.min_trade_amount}")

@@ -1212,8 +1212,12 @@ class NothingHappensRuntime:
         if cash_balance <= 0.0:
             cached_balance = await self._ensure_cash_balance(log_context="entry")
             cash_balance = max(0.0, float(self._available_cash_balance() if cached_balance is not None else 0.0))
+            
+        open_positions_value = sum(pos.current_value for pos in self._positions_by_slug.values())
+        portfolio_value = cash_balance + open_positions_value
+        
         target_notional = self._target_notional(
-            cash_balance=cash_balance,
+            portfolio_value=portfolio_value,
             submitted_price=submitted_buy_price,
             market_min_order_size=market.min_order_size,
             book_min_order_size=book.min_order_size,
@@ -1641,7 +1645,7 @@ class NothingHappensRuntime:
     def _target_notional(
         self,
         *,
-        cash_balance: float,
+        portfolio_value: float,
         submitted_price: float,
         market_min_order_size: float,
         book_min_order_size: float,
@@ -1649,7 +1653,7 @@ class NothingHappensRuntime:
         base_notional = (
             self.cfg.fixed_trade_amount
             if self.cfg.fixed_trade_amount > 0
-            else max(cash_balance * self.cfg.cash_pct_per_trade, self.cfg.min_trade_amount)
+            else max(portfolio_value * self.cfg.portfolio_pct_per_trade, self.cfg.min_trade_amount)
         )
         minimum_shares = max(0.0, market_min_order_size, book_min_order_size)
         if minimum_shares <= 0 or submitted_price <= 0:

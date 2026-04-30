@@ -37,6 +37,22 @@ def _record_supervisor_event(action: str, **extra) -> None:
     except Exception:
         pass
 
+    try:
+        from bot.telegram_notifier import send_telegram_message
+        import asyncio
+        if "error" in extra:
+            msg = f"⚠️ <b>{action}</b>\nError: {extra['error']}"
+            if "feed" in extra:
+                msg += f"\nFeed: {extra['feed']}"
+            asyncio.create_task(send_telegram_message(msg))
+        elif action in ("feed_dead", "feed_crashed"):
+            msg = f"⚠️ <b>{action}</b>"
+            if "feed" in extra:
+                msg += f"\nFeed: {extra['feed']}"
+            asyncio.create_task(send_telegram_message(msg))
+    except Exception:
+        pass
+
 
 def _validate_live_runtime(exchange_cfg, database_url: str | None) -> None:
     if exchange_cfg.live_send_enabled and not database_url:
@@ -110,7 +126,7 @@ async def run():
             "chain_id": exchange_cfg.chain_id,
             "signature_type": exchange_cfg.signature_type,
             "live_send_enabled": exchange_cfg.live_send_enabled,
-            "cash_pct_per_trade": strategy_cfg.cash_pct_per_trade,
+            "portfolio_pct_per_trade": strategy_cfg.portfolio_pct_per_trade,
             "min_trade_amount": strategy_cfg.min_trade_amount,
             "max_entry_price": strategy_cfg.max_entry_price,
             "allowed_slippage": strategy_cfg.allowed_slippage,
@@ -142,6 +158,7 @@ async def run():
     rpc_url = (exchange_cfg.polygon_rpc_url or "").strip()
     if (
         exchange_cfg.live_send_enabled
+        and strategy_cfg.auto_redeem_enabled
         and exchange_cfg.private_key
         and exchange_cfg.signature_type == 2
         and exchange_cfg.funder_address
@@ -363,6 +380,11 @@ async def run():
         for (name, _), result in zip(tasks.items(), results):
             if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
                 logger.error("task_error_on_shutdown", extra={"task": name, "error": str(result)})
+                try:
+                    from bot.telegram_notifier import send_telegram_message
+                    await send_telegram_message(f"⚠️ <b>Task Error on Shutdown</b>\nTask: {name}\nError: {str(result)}")
+                except Exception:
+                    pass
 
     background_executor.shutdown(wait=True, cancel_futures=False)
     logger.info("shutdown_complete")

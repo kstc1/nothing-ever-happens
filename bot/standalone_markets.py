@@ -20,10 +20,10 @@ except OSError:
     _LIBC = None
 
 GAMMA_API = "https://gamma-api.polymarket.com"
-PAGE_LIMIT = 100
+PAGE_LIMIT = 1000
 DEFAULT_MAX_END_DATE_MONTHS = 3
-PAGE_DELAY_SEC = 0.1
-PAGE_BURST_SIZE = 20
+PAGE_DELAY_SEC = 0.2
+PAGE_BURST_SIZE = 10
 PAGE_BURST_PAUSE_SEC = 2.0
 PAGE_MAX_RETRIES = 8
 PAGE_RETRY_BASE_DELAY_SEC = 1.0
@@ -282,11 +282,12 @@ async def _iter_open_market_batches(session: aiohttp.ClientSession):
                 f"{GAMMA_API}/markets",
                 params=params,
                 headers={"User-Agent": "polymarket-scanner/1.0"},
+                timeout=15.0,
             ) as resp:
                 resp.raise_for_status()
                 batch = await resp.json()
         except aiohttp.ClientResponseError as exc:
-            if exc.status == 429 and retries < PAGE_MAX_RETRIES:
+            if exc.status in (429, 500, 502, 503, 504) and retries < PAGE_MAX_RETRIES:
                 retry_after = _parse_retry_after_seconds(exc.headers)
                 delay = retry_after if retry_after is not None else min(
                     PAGE_RETRY_BASE_DELAY_SEC * (2 ** retries),
@@ -294,8 +295,9 @@ async def _iter_open_market_batches(session: aiohttp.ClientSession):
                 )
                 retries += 1
                 logger.warning(
-                    "gamma_markets_rate_limited offset=%d retry=%d delay=%.2f",
+                    "gamma_markets_rate_limited_or_error offset=%d status=%s retry=%d delay=%.2f",
                     offset,
+                    exc.status,
                     retries,
                     delay,
                 )
@@ -310,7 +312,18 @@ async def _iter_open_market_batches(session: aiohttp.ClientSession):
             raise GammaMarketFetchError(f"gamma_markets_fetch_aborted offset={offset} status={exc.status}") from exc
         except aiohttp.ClientError as exc:
             logger.warning("gamma_markets_fetch_failed offset=%d err=%s", offset, exc)
-            raise GammaMarketFetchError(f"gamma_markets_fetch_failed offset={offset}") from exc
+            raise GammaMarketFetchError("gamma_markets_fetch_failed") from exc
+        except asyncio.TimeoutError as exc:
+            logger.warning("gamma_markets_fetch_timeout offset=%d", offset)
+            if retries < PAGE_MAX_RETRIES:
+                delay = min(
+                    PAGE_RETRY_BASE_DELAY_SEC * (2 ** retries),
+                    PAGE_RETRY_MAX_DELAY_SEC,
+                )
+                retries += 1
+                await asyncio.sleep(delay)
+                continue
+            raise GammaMarketFetchError("gamma_markets_fetch_timeout") from exc
 
         retries = 0
         if not isinstance(batch, list) or not batch:
@@ -458,7 +471,7 @@ async def fetch_markets_by_token_ids(
         retries = 0
         while retries < PAGE_MAX_RETRIES:
             try:
-                async with session.get(url, headers={"User-Agent": "polymarket-scanner/1.0"}) as resp:
+                async with session.get(url, headers={"User-Agent": "polymarket-scanner/1.0"}, timeout=15.0) as resp:
                     resp.raise_for_status()
                     batch = await resp.json()
                     
@@ -483,6 +496,11 @@ async def fetch_markets_by_token_ids(
                 else:
                     logger.warning("gamma_markets_by_token_aborted status=%s err=%s", exc.status, exc)
                     break
+            except asyncio.TimeoutError:
+                logger.warning("gamma_markets_by_token_timeout")
+                retries += 1
+                await asyncio.sleep(1.0)
+                continue
             except Exception as exc:
                 logger.warning("gamma_markets_by_token_failed err=%s", exc)
                 break
