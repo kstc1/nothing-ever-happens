@@ -59,6 +59,7 @@ def test_load_nothing_happens_config_defaults(tmp_path, monkeypatch) -> None:
     assert strategy.market_refresh_interval_sec == 600
     assert strategy.portfolio_pct_per_trade == 0.02
     assert strategy.fixed_trade_amount == 0.0
+    assert strategy.min_entry_price == 0.0
     assert strategy.max_entry_price == 0.65
     assert strategy.max_new_positions == -1
     assert strategy.risk_config.max_total_open_exposure_usd == 1_500.0
@@ -112,6 +113,7 @@ def test_load_nothing_happens_config_applies_risk_env_overrides(tmp_path, monkey
 def test_load_nothing_happens_config_applies_env_overrides(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, _base_config()))
     monkeypatch.setenv("PM_NH_FIXED_TRADE_AMOUNT_USD", "5")
+    monkeypatch.setenv("PM_NH_MIN_ENTRY_PRICE", "0.11")
     monkeypatch.setenv("PM_NH_ORDER_DISPATCH_INTERVAL_SEC", "75")
     monkeypatch.setenv("PM_NH_MAX_NEW_POSITIONS", "2")
     monkeypatch.setenv("PM_NH_SHUTDOWN_ON_MAX_NEW_POSITIONS", "true")
@@ -120,6 +122,7 @@ def test_load_nothing_happens_config_applies_env_overrides(tmp_path, monkeypatch
 
     assert exchange.host == "https://clob.polymarket.com"
     assert strategy.fixed_trade_amount == 5.0
+    assert strategy.min_entry_price == 0.11
     assert strategy.order_dispatch_interval_sec == 75
     assert strategy.max_new_positions == 2
     assert strategy.shutdown_on_max_new_positions is True
@@ -129,11 +132,37 @@ def test_load_nothing_happens_config_validates_bounds(tmp_path, monkeypatch) -> 
     payload = _base_config(
         strategy_cfg={
             "portfolio_pct_per_trade": 0,
-            "max_entry_price": 1.2,
+            "min_entry_price": 0.8,
+            "max_entry_price": 0.6,
         }
     )
     monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
     with pytest.raises(ValueError, match="portfolio_pct_per_trade"):
+        load_nothing_happens_config()
+
+
+def test_load_nothing_happens_config_validates_min_entry_price_bounds(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    payload = _base_config(strategy_cfg={"min_entry_price": -0.01})
+    monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
+    with pytest.raises(ValueError, match="min_entry_price"):
+        load_nothing_happens_config()
+
+
+def test_load_nothing_happens_config_validates_min_not_greater_than_max_entry_price(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    payload = _base_config(
+        strategy_cfg={
+            "min_entry_price": 0.8,
+            "max_entry_price": 0.6,
+        }
+    )
+    monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
+    with pytest.raises(ValueError, match="min_entry_price cannot be greater"):
         load_nothing_happens_config()
 
 

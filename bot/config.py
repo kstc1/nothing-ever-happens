@@ -1,9 +1,10 @@
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from bot.risk_controls import RiskConfig
 from bot.secret_str import SecretStr
 
 
@@ -20,6 +21,15 @@ def _env_bool(name: str, default: bool) -> bool:
 def _env_optional(name: str) -> str | None:
     raw = os.getenv(name)
     return raw if raw else None
+
+
+def _env_optional_with_default(name: str, default: str | None) -> str | None:
+    raw = _env_optional(name)
+    if raw is not None:
+        return raw
+    if default is None:
+        return None
+    return str(default).strip() or None
 
 
 def _env_secret(name: str) -> SecretStr | None:
@@ -60,11 +70,78 @@ def _env_float(name: str, default: float) -> float:
     return float(raw)
 
 
-def _compute_live_send_enabled() -> bool:
-    mode = os.getenv("BOT_MODE", "paper").strip().lower()
-    live_trading = _env_bool("LIVE_TRADING_ENABLED", False)
-    dry_run = _env_bool("DRY_RUN", True)
-    return mode == "live" and live_trading and not dry_run
+def _env_str(name: str, default: str) -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    v = raw.strip()
+    return v if v else default
+
+
+@dataclass(frozen=True)
+class DeploymentConfig:
+    bot_mode: str = "paper"
+    dry_run: bool = True
+    live_trading_enabled: bool = False
+    database_url: str | None = None
+    dashboard_port: int = 8080
+
+
+def _build_deployment_config(cfg: dict[str, Any]) -> DeploymentConfig:
+    deployment = cfg.get("deployment", {})
+    if deployment is None:
+        deployment = {}
+    if not isinstance(deployment, dict):
+        raise ValueError("config.json field 'deployment' must be an object")
+
+    # Config defaults
+    bot_mode_cfg = str(deployment.get("bot_mode", "paper")).strip().lower() or "paper"
+    dry_run_cfg = bool(deployment.get("dry_run", True))
+    live_trading_cfg = bool(deployment.get("live_trading_enabled", False))
+
+    database_url_cfg = deployment.get("database_url")
+    database_url_cfg = str(database_url_cfg).strip() if database_url_cfg else None
+
+    dashboard_port_cfg = deployment.get("dashboard_port", 8080)
+    try:
+        dashboard_port_cfg = int(dashboard_port_cfg)
+    except (TypeError, ValueError):
+        dashboard_port_cfg = 8080
+
+    # Env overrides
+    bot_mode = _env_str("BOT_MODE", bot_mode_cfg).strip().lower()
+    dry_run = _env_bool("DRY_RUN", dry_run_cfg)
+    live_trading_enabled = _env_bool("LIVE_TRADING_ENABLED", live_trading_cfg)
+
+    # Database URL can be supplied either way; treat empty env var as "unset".
+    database_url_env = os.getenv("DATABASE_URL")
+    database_url_env = database_url_env.strip() if database_url_env else ""
+    database_url = database_url_env or database_url_cfg
+
+    dash_env = os.getenv("PORT") or os.getenv("DASHBOARD_PORT")
+    if dash_env and str(dash_env).strip():
+        try:
+            dashboard_port = int(dash_env)
+        except ValueError:
+            dashboard_port = dashboard_port_cfg
+    else:
+        dashboard_port = dashboard_port_cfg
+
+    return DeploymentConfig(
+        bot_mode=bot_mode,
+        dry_run=dry_run,
+        live_trading_enabled=live_trading_enabled,
+        database_url=database_url,
+        dashboard_port=dashboard_port,
+    )
+
+
+def _compute_live_send_enabled(deployment: DeploymentConfig) -> bool:
+    return (
+        deployment.bot_mode.strip().lower() == "live"
+        and bool(deployment.live_trading_enabled)
+        and not bool(deployment.dry_run)
+    )
 
 
 def _load_config_file() -> dict[str, Any]:
@@ -140,15 +217,15 @@ class ExchangeConfig:
             )
 
 
-def _build_exchange_config(conn: dict[str, Any]) -> ExchangeConfig:
+def _build_exchange_config(conn: dict[str, Any], deployment: DeploymentConfig) -> ExchangeConfig:
     exchange = ExchangeConfig(
         host=str(conn.get("host", "https://clob.polymarket.com")),
         chain_id=int(conn.get("chain_id", 137)),
         signature_type=int(conn.get("signature_type", 2)),
         private_key=_env_secret("PRIVATE_KEY"),
-        funder_address=_env_optional("FUNDER_ADDRESS"),
-        polygon_rpc_url=_env_optional("POLYGON_RPC_URL"),
-        live_send_enabled=_compute_live_send_enabled(),
+        funder_address=_env_optional_with_default("FUNDER_ADDRESS", conn.get("funder_address")),
+        polygon_rpc_url=_env_optional_with_default("POLYGON_RPC_URL", conn.get("polygon_rpc_url")),
+        live_send_enabled=_compute_live_send_enabled(deployment),
     )
     exchange.validate()
     return exchange
@@ -163,6 +240,7 @@ class NothingHappensConfig:
     portfolio_pct_per_trade: float = 0.02
     min_trade_amount: float = 5.0
     fixed_trade_amount: float = 0.0
+    min_entry_price: float = 0.0
     max_entry_price: float = 0.65
     allowed_slippage: float = 0.30
     request_concurrency: int = 4
@@ -182,23 +260,95 @@ class NothingHappensConfig:
     min_time_remaining_sec: float = 3600.0
     limit_order_max_age_sec: float = float("inf")
     max_positions_per_category: int = -1
+    risk_config: RiskConfig = field(default_factory=RiskConfig)
     excluded_keywords: frozenset[str] = frozenset()
     excluded_title_phrases: frozenset[str] = frozenset()
 
 
-def load_nothing_happens_config() -> tuple[ExchangeConfig, NothingHappensConfig]:
+def load_nothing_happens_config() -> tuple[ExchangeConfig, NothingHappensConfig, DeploymentConfig]:
     return _load_nothing_happens_config(_load_config_file())
 
 
 def _load_nothing_happens_config(
     cfg: dict[str, Any],
-) -> tuple[ExchangeConfig, NothingHappensConfig]:
+) -> tuple[ExchangeConfig, NothingHappensConfig, DeploymentConfig]:
     conn = cfg.get("connection", {})
     if not isinstance(conn, dict):
         raise ValueError("config.json field 'connection' must be an object")
     strat = _get_nothing_happens_section(cfg)
 
-    exchange = _build_exchange_config(conn)
+    deploy = _build_deployment_config(cfg)
+
+    exchange = _build_exchange_config(conn, deploy)
+
+    risk_section = strat.get("risk_config", {})
+    if risk_section is None:
+        risk_section = {}
+    if not isinstance(risk_section, dict):
+        raise ValueError("strategies.nothing_happens.risk_config must be an object")
+
+    risk_cfg = RiskConfig(
+        max_total_open_exposure_usd=float(
+            risk_section.get("max_total_open_exposure_usd", RiskConfig.max_total_open_exposure_usd)
+        ),
+        max_market_open_exposure_usd=float(
+            risk_section.get("max_market_open_exposure_usd", RiskConfig.max_market_open_exposure_usd)
+        ),
+        max_daily_drawdown_usd=float(
+            risk_section.get("max_daily_drawdown_usd", RiskConfig.max_daily_drawdown_usd)
+        ),
+        kill_switch_cooldown_sec=float(
+            risk_section.get("kill_switch_cooldown_sec", RiskConfig.kill_switch_cooldown_sec)
+        ),
+        drawdown_arm_after_sec=float(
+            risk_section.get("drawdown_arm_after_sec", RiskConfig.drawdown_arm_after_sec)
+        ),
+        drawdown_min_fresh_observations=int(
+            risk_section.get(
+                "drawdown_min_fresh_observations",
+                RiskConfig.drawdown_min_fresh_observations,
+            )
+        ),
+    )
+
+    # Apply env overrides (env wins over config).
+    risk_cfg = RiskConfig(
+        max_total_open_exposure_usd=_env_float(
+            "PM_RISK_MAX_TOTAL_OPEN_EXPOSURE_USD",
+            risk_cfg.max_total_open_exposure_usd,
+        ),
+        max_market_open_exposure_usd=_env_float(
+            "PM_RISK_MAX_MARKET_OPEN_EXPOSURE_USD",
+            risk_cfg.max_market_open_exposure_usd,
+        ),
+        max_daily_drawdown_usd=_env_float(
+            "PM_RISK_MAX_DAILY_DRAWDOWN_USD",
+            risk_cfg.max_daily_drawdown_usd,
+        ),
+        kill_switch_cooldown_sec=max(
+            1.0,
+            _env_float(
+                "PM_RISK_KILL_COOLDOWN_SEC",
+                risk_cfg.kill_switch_cooldown_sec,
+            ),
+        ),
+        drawdown_arm_after_sec=max(
+            0.0,
+            _env_float(
+                "PM_RISK_DRAWDOWN_ARM_AFTER_SEC",
+                risk_cfg.drawdown_arm_after_sec,
+            ),
+        ),
+        drawdown_min_fresh_observations=max(
+            1,
+            int(
+                _env_float(
+                    "PM_RISK_DRAWDOWN_MIN_FRESH_OBS",
+                    float(risk_cfg.drawdown_min_fresh_observations),
+                )
+            ),
+        ),
+    )
     strategy = NothingHappensConfig(
         market_refresh_interval_sec=_env_int(
             "PM_NH_MARKET_REFRESH_INTERVAL_SEC",
@@ -227,6 +377,10 @@ def _load_nothing_happens_config(
         fixed_trade_amount=_env_float(
             "PM_NH_FIXED_TRADE_AMOUNT_USD",
             float(strat.get("fixed_trade_amount", 0.0)),
+        ),
+        min_entry_price=_env_float(
+            "PM_NH_MIN_ENTRY_PRICE",
+            float(strat.get("min_entry_price", 0.0)),
         ),
         max_entry_price=_env_float(
             "PM_NH_MAX_ENTRY_PRICE",
@@ -306,11 +460,12 @@ def _load_nothing_happens_config(
             "PM_NH_MAX_POSITIONS_PER_CATEGORY",
             int(strat.get("max_positions_per_category", -1)),
         ),
+        risk_config=risk_cfg,
         excluded_keywords=frozenset(str(k).lower() for k in strat.get("excluded_keywords", [])),
         excluded_title_phrases=frozenset(str(p).lower() for p in strat.get("excluded_title_phrases", [])),
     )
     _validate_nothing_happens_config(strategy)
-    return exchange, strategy
+    return exchange, strategy, deploy
 
 
 def _validate_nothing_happens_config(cfg: NothingHappensConfig) -> None:
@@ -330,6 +485,23 @@ def _validate_nothing_happens_config(cfg: NothingHappensConfig) -> None:
         raise ValueError(
             f"order_dispatch_interval_sec must be >= 5, got {cfg.order_dispatch_interval_sec}"
         )
+
+    # Risk config bounds
+    if cfg.risk_config.max_total_open_exposure_usd <= 0:
+        raise ValueError(
+            "max_total_open_exposure_usd must be > 0, got "
+            f"{cfg.risk_config.max_total_open_exposure_usd}"
+        )
+    if cfg.risk_config.max_market_open_exposure_usd <= 0:
+        raise ValueError(
+            "max_market_open_exposure_usd must be > 0, got "
+            f"{cfg.risk_config.max_market_open_exposure_usd}"
+        )
+    if cfg.risk_config.max_daily_drawdown_usd < 0:
+        raise ValueError(
+            "max_daily_drawdown_usd must be >= 0, got "
+            f"{cfg.risk_config.max_daily_drawdown_usd}"
+        )
     if not (0 < cfg.portfolio_pct_per_trade <= 1.0):
         raise ValueError(
             f"portfolio_pct_per_trade must be in (0, 1.0], got {cfg.portfolio_pct_per_trade}"
@@ -338,8 +510,12 @@ def _validate_nothing_happens_config(cfg: NothingHappensConfig) -> None:
         raise ValueError(f"min_trade_amount must be > 0, got {cfg.min_trade_amount}")
     if cfg.fixed_trade_amount < 0:
         raise ValueError(f"fixed_trade_amount must be >= 0, got {cfg.fixed_trade_amount}")
+    if not (0 <= cfg.min_entry_price <= 1.0):
+        raise ValueError(f"min_entry_price must be in [0, 1.0], got {cfg.min_entry_price}")
     if not (0 < cfg.max_entry_price <= 1.0):
         raise ValueError(f"max_entry_price must be in (0, 1.0], got {cfg.max_entry_price}")
+    if cfg.min_entry_price > cfg.max_entry_price:
+        raise ValueError("min_entry_price cannot be greater than max_entry_price")
     if not (0 < cfg.allowed_slippage <= 1.0):
         raise ValueError(f"allowed_slippage must be in (0, 1.0], got {cfg.allowed_slippage}")
     if cfg.request_concurrency < 1:

@@ -41,6 +41,12 @@ Additional live-mode requirements:
 - `DATABASE_URL`
 - `POLYGON_RPC_URL` for proxy-wallet approvals and redemption
 
+Notes on configuration vs secrets:
+
+- Non-secret runtime settings (scheduling, thresholds, strategy parameters, risk limits, dashboard port) belong in `config.json` and are the primary source of truth.
+- Secrets and deployment toggles that control live behavior (like `PRIVATE_KEY`, `DATABASE_URL`, and `POLYGON_RPC_URL`) must be stored in `.env` or injected via your runtime environment (systemd, Heroku config vars, container secrets).
+- `FUNDER_ADDRESS` may be placed in `config.json` under `connection.funder_address` for convenience, but an environment variable `FUNDER_ADDRESS` will override it at runtime.
+
 ## Setup
 
 ```bash

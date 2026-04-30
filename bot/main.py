@@ -107,10 +107,10 @@ async def run():
     configure_logging(os.getenv("LOG_LEVEL", "INFO"))
     _patch_clob_http_timeout()
 
-    exchange_cfg, strategy_cfg = load_nothing_happens_config()
+    exchange_cfg, strategy_cfg, deploy_cfg = load_nothing_happens_config()
     strategy_wallet_address = _resolve_live_wallet_address(exchange_cfg)
 
-    database_url = os.getenv("DATABASE_URL")
+    database_url = os.getenv("DATABASE_URL") or deploy_cfg.database_url
     _validate_live_runtime(exchange_cfg, database_url)
 
     if database_url:
@@ -143,7 +143,7 @@ async def run():
         max_workers=max(4, int(os.getenv("PM_BACKGROUND_EXECUTOR_WORKERS", "8"))),
         thread_name_prefix="pm-bg",
     )
-    risk = RiskController(RiskConfig.from_env())
+    risk = RiskController(strategy_cfg.risk_config)
     recovery = (
         LiveRecoveryCoordinator(database_url, background_executor=background_executor)
         if exchange_cfg.live_send_enabled
@@ -176,7 +176,8 @@ async def run():
         )
         logger.info("redeemer_enabled")
 
-    dashboard_port = os.getenv("PORT") or os.getenv("DASHBOARD_PORT")
+    # Dashboard port: env override → config deployment section → default 8080
+    dashboard_port = os.getenv("PORT") or os.getenv("DASHBOARD_PORT") or str(deploy_cfg.dashboard_port)
     dashboard_task = None
     if dashboard_port:
         from bot.dashboard import DashboardServer
