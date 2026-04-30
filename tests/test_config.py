@@ -51,6 +51,16 @@ def test_load_nothing_happens_config_rejects_unsupported_strategy_selector(
 
 
 def test_load_nothing_happens_config_defaults(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("BOT_MODE", raising=False)
+    monkeypatch.delenv("DRY_RUN", raising=False)
+    monkeypatch.delenv("LIVE_TRADING_ENABLED", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+    monkeypatch.delenv("DASHBOARD_PORT", raising=False)
+    monkeypatch.delenv("PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("FUNDER_ADDRESS", raising=False)
+    monkeypatch.delenv("POLYGON_RPC_URL", raising=False)
+
     monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, _base_config()))
     exchange, strategy, deploy = load_nothing_happens_config()
 
@@ -61,6 +71,8 @@ def test_load_nothing_happens_config_defaults(tmp_path, monkeypatch) -> None:
     assert strategy.fixed_trade_amount == 0.0
     assert strategy.min_entry_price == 0.0
     assert strategy.max_entry_price == 0.65
+    assert strategy.max_total_positions == -1
+    assert strategy.shutdown_on_max_positions is False
     assert strategy.max_new_positions == -1
     assert strategy.risk_config.max_total_open_exposure_usd == 1_500.0
     assert strategy.risk_config.max_market_open_exposure_usd == 1_000.0
@@ -115,8 +127,8 @@ def test_load_nothing_happens_config_applies_env_overrides(tmp_path, monkeypatch
     monkeypatch.setenv("PM_NH_FIXED_TRADE_AMOUNT_USD", "5")
     monkeypatch.setenv("PM_NH_MIN_ENTRY_PRICE", "0.11")
     monkeypatch.setenv("PM_NH_ORDER_DISPATCH_INTERVAL_SEC", "75")
-    monkeypatch.setenv("PM_NH_MAX_NEW_POSITIONS", "2")
-    monkeypatch.setenv("PM_NH_SHUTDOWN_ON_MAX_NEW_POSITIONS", "true")
+    monkeypatch.setenv("PM_NH_MAX_TOTAL_POSITIONS", "2")
+    monkeypatch.setenv("PM_NH_SHUTDOWN_ON_MAX_POSITIONS", "true")
 
     exchange, strategy, deploy = load_nothing_happens_config()
 
@@ -124,8 +136,8 @@ def test_load_nothing_happens_config_applies_env_overrides(tmp_path, monkeypatch
     assert strategy.fixed_trade_amount == 5.0
     assert strategy.min_entry_price == 0.11
     assert strategy.order_dispatch_interval_sec == 75
-    assert strategy.max_new_positions == 2
-    assert strategy.shutdown_on_max_new_positions is True
+    assert strategy.max_total_positions == 2
+    assert strategy.shutdown_on_max_positions is True
 
 
 def test_load_nothing_happens_config_validates_bounds(tmp_path, monkeypatch) -> None:
@@ -183,28 +195,49 @@ def test_load_nothing_happens_config_accepts_negative_one_for_unbounded_position
     tmp_path,
     monkeypatch,
 ) -> None:
-    payload = _base_config(strategy_cfg={"max_new_positions": -1})
+    payload = _base_config(strategy_cfg={"max_total_positions": -1})
     monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
 
     _, strategy, _ = load_nothing_happens_config()
 
-    assert strategy.max_new_positions == -1
+    assert strategy.max_total_positions == -1
 
 
 def test_load_nothing_happens_config_rejects_less_than_negative_one(
     tmp_path,
     monkeypatch,
 ) -> None:
-    payload = _base_config(strategy_cfg={"max_new_positions": -2})
+    payload = _base_config(strategy_cfg={"max_total_positions": -2})
     monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
-    with pytest.raises(ValueError, match="max_new_positions must be >= -1"):
+    with pytest.raises(ValueError, match="max_total_positions must be >= -1"):
         load_nothing_happens_config()
+
+
+def test_load_nothing_happens_config_uses_legacy_max_new_positions_as_fallback(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    payload = _base_config(
+        strategy_cfg={
+            "max_new_positions": 7,
+            "shutdown_on_max_new_positions": True,
+        }
+    )
+    monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
+
+    _, strategy, _ = load_nothing_happens_config()
+
+    assert strategy.max_total_positions == 7
+    assert strategy.shutdown_on_max_positions is True
 
 
 def test_load_nothing_happens_config_requires_private_key_when_live_send_enabled(
     tmp_path,
     monkeypatch,
 ) -> None:
+    monkeypatch.delenv("PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("FUNDER_ADDRESS", raising=False)
+    monkeypatch.delenv("POLYGON_RPC_URL", raising=False)
     monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, _base_config()))
     monkeypatch.setenv("BOT_MODE", "live")
     monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
@@ -221,6 +254,8 @@ def test_load_nothing_happens_config_requires_funder_for_proxy_wallets(
         "CONFIG_PATH",
         _write_config(tmp_path, _base_config(connection={"signature_type": 2})),
     )
+    monkeypatch.delenv("FUNDER_ADDRESS", raising=False)
+    monkeypatch.delenv("POLYGON_RPC_URL", raising=False)
     monkeypatch.setenv("BOT_MODE", "live")
     monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
     monkeypatch.setenv("DRY_RUN", "false")
@@ -256,6 +291,13 @@ def test_load_nothing_happens_config_deployment_section(tmp_path, monkeypatch) -
         "database_url": "postgresql://user:pass@localhost/db",
         "dashboard_port": 9090,
     }
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("BOT_MODE", raising=False)
+    monkeypatch.delenv("DRY_RUN", raising=False)
+    monkeypatch.delenv("LIVE_TRADING_ENABLED", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+    monkeypatch.delenv("DASHBOARD_PORT", raising=False)
+
     monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
     monkeypatch.setenv("PRIVATE_KEY", "0xabc")
     monkeypatch.setenv("FUNDER_ADDRESS", "0x0000000000000000000000000000000000000001")
@@ -276,6 +318,12 @@ def test_load_nothing_happens_config_env_overrides_deployment(tmp_path, monkeypa
         "bot_mode": "paper",
         "dashboard_port": 8080,
     }
+    # We set these, but clear others to be safe
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("DRY_RUN", raising=False)
+    monkeypatch.delenv("LIVE_TRADING_ENABLED", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+
     monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
     monkeypatch.setenv("BOT_MODE", "live")
     monkeypatch.setenv("DASHBOARD_PORT", "9999")

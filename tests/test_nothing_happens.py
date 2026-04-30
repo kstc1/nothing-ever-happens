@@ -732,10 +732,10 @@ async def test_refresh_recovery_state_releases_reservation_after_not_filled_reso
     assert runtime._available_cash_balance() == pytest.approx(100.0)
 
 
-def test_initialize_target_defaults_to_existing_positions_plus_max_new_positions() -> None:
+def test_initialize_target_uses_max_total_positions_limit() -> None:
     control_state = NothingHappensControlState()
     runtime = _make_runtime(
-        cfg=NothingHappensConfig(max_new_positions=5),
+        cfg=NothingHappensConfig(max_total_positions=5),
         control_state=control_state,
     )
     market = _make_market(slug="existing-one")
@@ -759,7 +759,7 @@ def test_initialize_target_defaults_to_existing_positions_plus_max_new_positions
 
     runtime._initialize_target_open_positions()
 
-    assert control_state.snapshot().target_open_positions == 6
+    assert control_state.snapshot().target_open_positions == 5
 
 
 @pytest.mark.asyncio
@@ -767,7 +767,7 @@ async def test_sync_positions_recomputes_auto_target_after_initial_fetch_failure
     control_state = NothingHappensControlState()
     runtime = _make_runtime(
         wallet_address="0xabc",
-        cfg=NothingHappensConfig(max_new_positions=5),
+        cfg=NothingHappensConfig(max_total_positions=5),
         control_state=control_state,
     )
     fetched_positions = [
@@ -810,13 +810,13 @@ async def test_sync_positions_recomputes_auto_target_after_initial_fetch_failure
         await runtime._sync_positions()
 
     assert len(runtime._positions_by_slug) == 2
-    assert control_state.snapshot().target_open_positions == 7
+    assert control_state.snapshot().target_open_positions == 5
 
 
 def test_initialize_target_preserves_manual_override_until_reset() -> None:
     control_state = NothingHappensControlState()
     runtime = _make_runtime(
-        cfg=NothingHappensConfig(max_new_positions=5),
+        cfg=NothingHappensConfig(max_total_positions=5),
         control_state=control_state,
     )
     market = _make_market(slug="existing-one")
@@ -846,11 +846,11 @@ def test_initialize_target_preserves_manual_override_until_reset() -> None:
     control_state.set_target_open_positions(None)
     runtime._initialize_target_open_positions()
 
-    assert control_state.snapshot().target_open_positions == 6
+    assert control_state.snapshot().target_open_positions == 5
 
 
-def test_max_new_positions_remains_spent_after_position_leaves_book() -> None:
-    runtime = _make_runtime(cfg=NothingHappensConfig(max_new_positions=2))
+def test_max_total_positions_capacity_recovers_after_position_leaves_book() -> None:
+    runtime = _make_runtime(cfg=NothingHappensConfig(max_total_positions=2))
 
     runtime._record_local_fill(
         market=_make_market(slug="opened-one"),
@@ -873,20 +873,20 @@ def test_max_new_positions_remains_spent_after_position_leaves_book() -> None:
     runtime._local_positions.pop("opened-one", None)
 
     assert runtime._opened_position_count == 2
-    assert runtime._remaining_queue_capacity() == 0
-    assert runtime._position_target_reached() is True
+    assert runtime._remaining_queue_capacity() == 1
+    assert runtime._position_target_reached() is False
 
 
-def test_max_new_positions_zero_blocks_new_entries() -> None:
-    runtime = _make_runtime(cfg=NothingHappensConfig(max_new_positions=0))
+def test_max_total_positions_zero_blocks_new_entries() -> None:
+    runtime = _make_runtime(cfg=NothingHappensConfig(max_total_positions=0))
 
     assert runtime._current_target_open_positions() == 0
     assert runtime._remaining_queue_capacity() == 0
     assert runtime._position_target_reached() is True
 
 
-def test_max_new_positions_negative_one_is_unbounded() -> None:
-    runtime = _make_runtime(cfg=NothingHappensConfig(max_new_positions=-1))
+def test_max_total_positions_negative_one_is_unbounded() -> None:
+    runtime = _make_runtime(cfg=NothingHappensConfig(max_total_positions=-1))
 
     assert runtime._current_target_open_positions() is None
     assert runtime._remaining_queue_capacity() is None
@@ -981,15 +981,15 @@ async def test_build_entry_plan_uses_submitted_price_for_share_minimums() -> Non
     assert plan.target_notional == pytest.approx(5.9)
 
 
-def test_record_local_fill_sets_shutdown_after_max_new_positions() -> None:
+def test_record_local_fill_sets_shutdown_after_max_total_positions() -> None:
     shutdown_event = asyncio.Event()
     runtime = NothingHappensRuntime(
         exchange=StubExchange(),
         session=SimpleNamespace(),
         cfg=NothingHappensConfig(
             fixed_trade_amount=5.0,
-            max_new_positions=2,
-            shutdown_on_max_new_positions=True,
+            max_total_positions=2,
+            shutdown_on_max_positions=True,
         ),
         risk=RiskController(
             RiskConfig(max_total_open_exposure_usd=1_000.0, max_market_open_exposure_usd=1_000.0)

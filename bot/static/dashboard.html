@@ -449,9 +449,14 @@ th[data-sort].sort-desc::after {
       <div class="meta" id="portfolio-breakdown">cash -- | positions --</div>
     </div>
     <div class="summary-card">
-      <div class="label">Session PnL</div>
-      <div class="value" id="session-pnl">--</div>
-      <div class="meta" id="session-balance">balance --</div>
+      <div class="label">Unrealized PnL</div>
+      <div class="value" id="unrealized-pnl">--</div>
+      <div class="meta">open positions mark-to-market</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">Realized PnL (Daily)</div>
+      <div class="value" id="realized-pnl">--</div>
+      <div class="meta">closed/settled outcomes today</div>
     </div>
     <div class="summary-card">
       <div class="label">Last Error</div>
@@ -462,10 +467,10 @@ th[data-sort].sort-desc::after {
 
   <section class="panel control-panel">
     <div class="panel-head">
-      <h2 class="panel-title">Position Cap</h2>
+      <h2 class="panel-title">Open Position Limit</h2>
       <div class="panel-note" id="target-status">env configured</div>
     </div>
-    <div class="trade-meta" id="target-meta">Open -- | Pending -- | Remaining -- | Target -- | Opened --</div>
+    <div class="trade-meta" id="target-meta">Open -- | Pending -- | Remaining -- | Limit --</div>
   </section>
 
   <div class="layout">
@@ -599,22 +604,21 @@ function renderTargetControls(msg) {
   const pendingCount = Number(msg.pending_entry_count || 0);
   const remaining = msg.remaining_position_capacity;
   const target = msg.target_open_positions;
-  const openedThisRun = Number(msg.opened_this_run || 0);
 
   document.getElementById("target-meta").textContent =
     "Open " + openCount +
     " | Pending " + pendingCount +
     " | Remaining " + (remaining == null ? "unlimited" : String(remaining)) +
-    " | Target " + fmtTarget(target) +
-    " | Opened " + openedThisRun;
+    " | Limit " + fmtTarget(target);
 }
 
 function renderPortfolio(msg) {
   latestPortfolio = msg;
   const positions = sortPositions(msg.positions || []);
-  const cashBalance = Number(msg.cash_balance || 0);
-  const positionsValue = positions.reduce((sum, position) => sum + Number(position.current_value || 0), 0);
-  const portfolioValue = (msg.cash_balance == null ? null : cashBalance + positionsValue);
+  const positionsValue = Number(msg.positions_value || 0);
+  const portfolioValue = msg.portfolio_total == null ? null : Number(msg.portfolio_total || 0);
+  const unrealizedPnl = Number(msg.unrealized_pnl_usd || 0);
+  const realizedPnl = msg.realized_pnl_usd == null ? null : Number(msg.realized_pnl_usd || 0);
 
   document.getElementById("monitored").textContent = String(msg.monitored_markets ?? "--");
   document.getElementById("eligible").textContent = String(msg.eligible_markets ?? "--");
@@ -624,6 +628,15 @@ function renderPortfolio(msg) {
   document.getElementById("portfolio-value").textContent = fmtUsd(portfolioValue);
   document.getElementById("portfolio-breakdown").textContent =
     "cash " + fmtUsd(msg.cash_balance) + " | positions " + fmtUsd(positionsValue);
+  document.getElementById("unrealized-pnl").textContent = (unrealizedPnl >= 0 ? "+" : "") + fmtUsd(unrealizedPnl);
+  document.getElementById("unrealized-pnl").className = "value " + (unrealizedPnl >= 0 ? "positive" : "negative");
+  if (realizedPnl == null) {
+    document.getElementById("realized-pnl").textContent = "--";
+    document.getElementById("realized-pnl").className = "value";
+  } else {
+    document.getElementById("realized-pnl").textContent = (realizedPnl >= 0 ? "+" : "") + fmtUsd(realizedPnl);
+    document.getElementById("realized-pnl").className = "value " + (realizedPnl >= 0 ? "positive" : "negative");
+  }
   document.getElementById("last-error").textContent = msg.last_error ? String(msg.last_error) : "none";
   document.getElementById("last-market-refresh").textContent =
     "market refresh " + fmtAgo(msg.last_market_refresh_ts);
@@ -755,16 +768,6 @@ function addTrade(msg) {
   }
 }
 
-function renderSessionPnl(msg) {
-  const pnlEl = document.getElementById("session-pnl");
-  const balEl = document.getElementById("session-balance");
-  const pnl = Number(msg.pnl_usd || 0);
-  const sign = pnl >= 0 ? "+" : "";
-  pnlEl.textContent = sign + fmtUsd(pnl).replace("$", "$");
-  pnlEl.className = "value " + (pnl >= 0 ? "positive" : "negative");
-  balEl.textContent = "balance " + fmtUsd(msg.current_balance);
-}
-
 function handleMessage(msg) {
   switch (msg.type) {
     case "portfolio":
@@ -772,9 +775,6 @@ function handleMessage(msg) {
       break;
     case "bot_trade":
       addTrade(msg);
-      break;
-    case "session_pnl":
-      renderSessionPnl(msg);
       break;
     case "control_ack":
       if (!msg.ok) {

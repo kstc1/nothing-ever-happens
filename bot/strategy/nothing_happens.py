@@ -316,14 +316,9 @@ class NothingHappensRuntime:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     def _default_target_open_positions(self) -> int | None:
-        if self.cfg.max_new_positions < 0:
+        if self.cfg.max_total_positions < 0:
             return None
-        baseline_open_positions = max(0, len(self._positions_by_slug) - self._opened_position_count)
-        self._auto_target_baseline_open_positions = max(
-            self._auto_target_baseline_open_positions,
-            baseline_open_positions,
-        )
-        return self._auto_target_baseline_open_positions + self.cfg.max_new_positions
+        return self.cfg.max_total_positions
 
     def _initialize_target_open_positions(self) -> int | None:
         default_target = self._default_target_open_positions()
@@ -343,36 +338,17 @@ class NothingHappensRuntime:
     def _uses_manual_target_override(self) -> bool:
         return self.control_state is not None and self.control_state.is_target_user_override()
 
-    def _remaining_new_entry_capacity(self) -> int | None:
-        if self._uses_manual_target_override() or self.cfg.max_new_positions < 0:
+    def _remaining_queue_capacity(self) -> int | None:
+        target = self._current_target_open_positions()
+        if target is None:
             return None
         return max(
             0,
-            self.cfg.max_new_positions
-            - self._opened_position_count
+            target
+            - len(self._positions_by_slug)
             - len(self._pending_entries_by_slug)
             - len(self._recovery_blocked_slugs),
         )
-
-    def _remaining_queue_capacity(self) -> int | None:
-        capacities: list[int] = []
-        target = self._current_target_open_positions()
-        if target is not None:
-            capacities.append(
-                max(
-                    0,
-                    target
-                    - len(self._positions_by_slug)
-                    - len(self._pending_entries_by_slug)
-                    - len(self._recovery_blocked_slugs),
-                )
-            )
-        new_entry_capacity = self._remaining_new_entry_capacity()
-        if new_entry_capacity is not None:
-            capacities.append(new_entry_capacity)
-        if not capacities:
-            return None
-        return min(capacities)
 
     def _eligible_markets(self) -> list[StandaloneMarket]:
         position_slugs = set(self._positions_by_slug)
@@ -392,9 +368,6 @@ class NothingHappensRuntime:
         return sum(1 for market in eligible_markets if self._market_in_range_by_slug.get(market.slug, False))
 
     def _position_target_reached(self) -> bool:
-        new_entry_capacity = self._remaining_new_entry_capacity()
-        if new_entry_capacity is not None and new_entry_capacity <= 0:
-            return True
         target = self._current_target_open_positions()
         return target is not None and (len(self._positions_by_slug) + len(self._recovery_blocked_slugs)) >= target
 
@@ -1637,9 +1610,9 @@ class NothingHappensRuntime:
                     "nothing_happens_entry_cap_reached open=%d target=%s shutdown=%s",
                     len(self._positions_by_slug),
                     self._current_target_open_positions(),
-                    self.cfg.shutdown_on_max_new_positions,
+                    self.cfg.shutdown_on_max_positions,
                 )
-                if self.cfg.shutdown_on_max_new_positions:
+                if self.cfg.shutdown_on_max_positions:
                     self.shutdown_event.set()
 
     def _target_notional(

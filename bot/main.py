@@ -132,7 +132,7 @@ async def run():
             "allowed_slippage": strategy_cfg.allowed_slippage,
             "price_poll_interval_sec": strategy_cfg.price_poll_interval_sec,
             "market_refresh_interval_sec": strategy_cfg.market_refresh_interval_sec,
-            "max_new_positions": strategy_cfg.max_new_positions,
+            "max_total_positions": strategy_cfg.max_total_positions,
         },
     )
 
@@ -187,6 +187,7 @@ async def run():
             nothing_happens_control=nothing_happens_control,
             port=int(dashboard_port),
             exchange=exchange,
+            risk_controller=risk,
         )
         dashboard_task = asyncio.create_task(dashboard.run(), name="dashboard")
         logger.info("dashboard_starting", extra={"port": int(dashboard_port)})

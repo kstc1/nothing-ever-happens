@@ -1,0 +1,30 @@
+{
+  "include": [
+    "bot"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    ".venv",
+    "**/.pytest_cache",
+    "**/.mypy_cache",
+    "**/.ruff_cache",
+    "**/build",
+    "**/dist"
+  ],
+  "venvPath": "/home/stefansy/nothing-ever-happens",
+  "venv": ".venv",
+  
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Linux",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": true,
+  "reportMissingTypeStubs": false,
+  "reportArgumentType": false,
+  "reportReturnType": false,
+  "reportAttributeAccessIssue": false,
+  "reportCallIssue": false,
+  "reportOptionalMemberAccess": false,
+  "reportOptionalSubscript": false,
+  "reportOptionalIterable": false,
+  "reportOptionalOperand": false
+}

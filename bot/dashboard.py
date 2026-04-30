@@ -34,20 +34,20 @@ class DashboardServer:
         exchange=None,
         portfolio_state=None,
         nothing_happens_control: NothingHappensControlState | None = None,
+        risk_controller=None,
     ):
         self.host = host
         self.port = port
         self._exchange = exchange
         self._portfolio_state = portfolio_state
         self._nothing_happens_control = nothing_happens_control
+        self._risk_controller = risk_controller
         self._clients: set[web.WebSocketResponse] = set()
         self._last_portfolio_version = -1
         self._last_nothing_happens_control_version = -1
         self._ledger_path = os.getenv("TRADE_LEDGER_PATH", "trades.jsonl")
         self._ledger_pos = 0
         self._trade_history: deque[dict] = deque(maxlen=TRADE_HISTORY_LIMIT)
-        self._starting_balance: float | None = None
-        self._current_balance: float | None = None
         self._last_balance_poll = 0.0
         self._balance_history: deque[tuple[float, float]] = deque(maxlen=BALANCE_HISTORY_LIMIT)
         self._resolutions: dict[str, str] = {}
@@ -111,8 +111,6 @@ class DashboardServer:
         portfolio_message = self._make_portfolio_message(force=True)
         if portfolio_message is not None:
             await self._send_to(ws, portfolio_message)
-        if self._starting_balance is not None and self._current_balance is not None:
-            await self._send_to(ws, self._make_pnl_message())
         if self._balance_history:
             await self._send_to(
                 ws,
@@ -173,13 +171,49 @@ class DashboardServer:
             if self._nothing_happens_control is not None
             else None
         )
+        positions = [
+            {
+                "slug": position.slug,
+                "title": position.title,
+                "outcome": position.outcome,
+                "asset": position.asset,
+                "condition_id": position.condition_id,
+                "size": round(position.size, 6),
+                "avg_price": round(position.avg_price, 6),
+                "initial_value": round(position.initial_value, 6),
+                "current_price": round(position.current_price, 6),
+                "current_value": round(position.current_value, 6),
+                "pnl_usd": round(position.pnl_usd, 6),
+                "pnl_pct": round(position.pnl_pct, 6),
+                "end_date": position.end_date,
+                "eta_seconds": round(position.eta_seconds, 3),
+                "source": position.source,
+            }
+            for position in snapshot.positions
+        ]
+        cash_balance = snapshot.cash_balance
+        positions_value = sum((float(position["current_value"]) for position in positions), 0.0)
+        unrealized_pnl_usd = sum((float(position["pnl_usd"]) for position in positions), 0.0)
+        portfolio_total = None if cash_balance is None else float(cash_balance) + positions_value
+        realized_pnl_usd = None
+        if self._risk_controller is not None:
+            try:
+                risk_snapshot = self._risk_controller.snapshot(int(time.time() * 1_000_000))
+                realized_pnl_usd = float(risk_snapshot.get("daily_realized_pnl_usd", 0.0))
+            except Exception:
+                realized_pnl_usd = None
+
         return {
             "type": "portfolio",
             "updated_at_us": snapshot.updated_at_us,
             "monitored_markets": snapshot.monitored_markets,
             "eligible_markets": snapshot.eligible_markets,
             "in_range_markets": snapshot.in_range_markets,
-            "cash_balance": snapshot.cash_balance,
+            "cash_balance": cash_balance,
+            "positions_value": round(positions_value, 6),
+            "portfolio_total": round(portfolio_total, 6) if portfolio_total is not None else None,
+            "unrealized_pnl_usd": round(unrealized_pnl_usd, 6),
+            "realized_pnl_usd": round(realized_pnl_usd, 6) if realized_pnl_usd is not None else None,
             "last_market_refresh_ts": snapshot.last_market_refresh_ts,
             "last_position_sync_ts": snapshot.last_position_sync_ts,
             "last_price_cycle_ts": snapshot.last_price_cycle_ts,
@@ -197,26 +231,7 @@ class DashboardServer:
                 control_snapshot.opened_this_run if control_snapshot is not None else 0
             ),
             "controls_enabled": control_snapshot is not None,
-            "positions": [
-                {
-                    "slug": position.slug,
-                    "title": position.title,
-                    "outcome": position.outcome,
-                    "asset": position.asset,
-                    "condition_id": position.condition_id,
-                    "size": round(position.size, 6),
-                    "avg_price": round(position.avg_price, 6),
-                    "initial_value": round(position.initial_value, 6),
-                    "current_price": round(position.current_price, 6),
-                    "current_value": round(position.current_value, 6),
-                    "pnl_usd": round(position.pnl_usd, 6),
-                    "pnl_pct": round(position.pnl_pct, 6),
-                    "end_date": position.end_date,
-                    "eta_seconds": round(position.eta_seconds, 3),
-                    "source": position.source,
-                }
-                for position in snapshot.positions
-            ],
+            "positions": positions,
         }
 
     async def _poll_trades(self) -> None:
@@ -240,21 +255,6 @@ class DashboardServer:
         except Exception as exc:
             logger.debug("Trade ledger poll error: %s", exc)
 
-    def _make_pnl_message(self) -> dict:
-        pnl_usd = (self._current_balance or 0.0) - (self._starting_balance or 0.0)
-        pnl_pct = (
-            (pnl_usd / self._starting_balance * 100.0)
-            if self._starting_balance and self._starting_balance > 0
-            else 0.0
-        )
-        return {
-            "type": "session_pnl",
-            "starting_balance": round(self._starting_balance or 0.0, 2),
-            "current_balance": round(self._current_balance or 0.0, 2),
-            "pnl_usd": round(pnl_usd, 2),
-            "pnl_pct": round(pnl_pct, 2),
-        }
-
     async def _poll_balance(self) -> None:
         if self._exchange is None:
             return
@@ -267,16 +267,8 @@ class DashboardServer:
                 asyncio.to_thread(self._exchange.get_collateral_balance),
                 timeout=BALANCE_TIMEOUT_SEC,
             )
-            if self._starting_balance is None:
-                self._starting_balance = balance
-                logger.info(
-                    "dashboard_starting_balance",
-                    extra={"balance": round(balance, 2)},
-                )
-            self._current_balance = balance
             ts_sec = time.time()
-            self._balance_history.append((ts_sec, balance))
-            await self._broadcast(self._make_pnl_message())
+            self._balance_history.append((ts_sec, float(balance)))
             await self._broadcast(
                 {
                     "type": "balance_point",

@@ -247,6 +247,9 @@ class NothingHappensConfig:
     buy_retry_count: int = 3
     buy_retry_base_delay_sec: float = 1.0
     max_backoff_sec: float = 900.0
+    max_total_positions: int = -1
+    shutdown_on_max_positions: bool = False
+    # Deprecated compatibility fields. Keep parsing while migrating configs.
     max_new_positions: int = -1
     shutdown_on_max_new_positions: bool = False
     auto_redeem_enabled: bool = True
@@ -349,6 +352,21 @@ def _load_nothing_happens_config(
             ),
         ),
     )
+
+    max_total_positions = _env_int(
+        "PM_NH_MAX_TOTAL_POSITIONS",
+        int(strat.get("max_total_positions", strat.get("max_new_positions", -1))),
+    )
+    shutdown_on_max_positions = _env_bool(
+        "PM_NH_SHUTDOWN_ON_MAX_POSITIONS",
+        bool(
+            strat.get(
+                "shutdown_on_max_positions",
+                strat.get("shutdown_on_max_new_positions", False),
+            )
+        ),
+    )
+
     strategy = NothingHappensConfig(
         market_refresh_interval_sec=_env_int(
             "PM_NH_MARKET_REFRESH_INTERVAL_SEC",
@@ -406,6 +424,8 @@ def _load_nothing_happens_config(
             "PM_NH_MAX_BACKOFF_SEC",
             float(strat.get("max_backoff_sec", 900.0)),
         ),
+        max_total_positions=max_total_positions,
+        shutdown_on_max_positions=shutdown_on_max_positions,
         max_new_positions=_env_int(
             "PM_NH_MAX_NEW_POSITIONS",
             int(strat.get("max_new_positions", -1)),
@@ -528,6 +548,8 @@ def _validate_nothing_happens_config(cfg: NothingHappensConfig) -> None:
         )
     if cfg.max_backoff_sec <= 0:
         raise ValueError(f"max_backoff_sec must be > 0, got {cfg.max_backoff_sec}")
+    if cfg.max_total_positions < -1:
+        raise ValueError(f"max_total_positions must be >= -1, got {cfg.max_total_positions}")
     if cfg.max_new_positions < -1:
         raise ValueError(f"max_new_positions must be >= -1, got {cfg.max_new_positions}")
     if cfg.redeemer_interval_sec < 60:
