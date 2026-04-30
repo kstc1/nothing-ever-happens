@@ -17,6 +17,7 @@
   --green: #52d19c;
   --red: #ff7a7a;
   --shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
+}
 * { box-sizing: border-box; }
 
 body {
@@ -439,11 +440,6 @@ th[data-sort].sort-desc::after {
       <div class="meta" id="last-position-sync">waiting for sync</div>
     </div>
     <div class="summary-card">
-      <div class="label">Cash</div>
-      <div class="value" id="cash-balance">--</div>
-      <div class="meta" id="last-price-cycle">waiting for cycle</div>
-    </div>
-    <div class="summary-card">
       <div class="label">Portfolio</div>
       <div class="value" id="portfolio-value">--</div>
       <div class="meta" id="portfolio-breakdown">cash -- | positions --</div>
@@ -624,7 +620,6 @@ function renderPortfolio(msg) {
   document.getElementById("eligible").textContent = String(msg.eligible_markets ?? "--");
   document.getElementById("in-range").textContent = String(msg.in_range_markets ?? "--");
   document.getElementById("open-count").textContent = String(positions.length);
-  document.getElementById("cash-balance").textContent = fmtUsd(msg.cash_balance);
   document.getElementById("portfolio-value").textContent = fmtUsd(portfolioValue);
   document.getElementById("portfolio-breakdown").textContent =
     "cash " + fmtUsd(msg.cash_balance) + " | positions " + fmtUsd(positionsValue);
@@ -642,8 +637,6 @@ function renderPortfolio(msg) {
     "market refresh " + fmtAgo(msg.last_market_refresh_ts);
   document.getElementById("last-position-sync").textContent =
     "position sync " + fmtAgo(msg.last_position_sync_ts);
-  document.getElementById("last-price-cycle").textContent =
-    "price cycle " + fmtAgo(msg.last_price_cycle_ts);
   document.getElementById("positions-note").textContent =
     positions.length
       ? "sorted by " + (document.querySelector("th[data-sort='" + sortColumn + "']")?.textContent || sortColumn)
