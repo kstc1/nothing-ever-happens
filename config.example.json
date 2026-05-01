@@ -32,6 +32,7 @@
       "min_time_remaining_sec": 3600,
       "limit_order_max_age_sec": 0,
       "max_positions_per_category": -1,
+      "strict_portfolio_pct_cap": false,
       "tradable_keywords": [
         "crypto",
         "cryptocurrency",

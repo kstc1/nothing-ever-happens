@@ -182,6 +182,7 @@ class NothingHappensConfig:
     min_time_remaining_sec: float = 3600.0
     limit_order_max_age_sec: float = float("inf")
     max_positions_per_category: int = -1
+    strict_portfolio_pct_cap: bool = False
     excluded_keywords: frozenset[str] = frozenset()
     excluded_title_phrases: frozenset[str] = frozenset()
 
@@ -305,6 +306,10 @@ def _load_nothing_happens_config(
         max_positions_per_category=_env_int(
             "PM_NH_MAX_POSITIONS_PER_CATEGORY",
             int(strat.get("max_positions_per_category", -1)),
+        ),
+        strict_portfolio_pct_cap=_env_bool(
+            "PM_NH_STRICT_PORTFOLIO_PCT_CAP",
+            bool(strat.get("strict_portfolio_pct_cap", False)),
         ),
         excluded_keywords=frozenset(str(k).lower() for k in strat.get("excluded_keywords", [])),
         excluded_title_phrases=frozenset(str(p).lower() for p in strat.get("excluded_title_phrases", [])),

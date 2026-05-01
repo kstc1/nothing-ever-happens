@@ -50,8 +50,17 @@ class StandaloneMarket:
     end_ts: float
     category: str
     event_slug: str
+    keyword_exclusion_blob: str
     created_at_ts: float = 0.0
     end_date_ts: float = 0.0
+
+
+@dataclass(frozen=True)
+class MarketsByTokensResult:
+    """Markets resolved from Gamma by CLOB token id, plus NO tokens skipped as config-excluded."""
+
+    markets: tuple[StandaloneMarket, ...]
+    excluded_no_token_ids: frozenset[str]
 
 
 def _get_event_slug(market: dict) -> str:
@@ -83,9 +92,12 @@ def _parse_iso_ts(value: str) -> float:
     return dt.timestamp()
 
 
-def _is_excluded_category(market: dict, excluded_keywords: frozenset[str]) -> bool:
-    if not excluded_keywords:
-        return False
+def _market_keyword_exclusion_blob(market: dict) -> str:
+    """Lowercased text from the same fields as keyword checks in Gamma payloads.
+
+    Used for `StandaloneMarket` so runtime exclusion matches discovery (`is_market_text_excluded`).
+    """
+    parts: list[str] = []
     tags = market.get("tags") or []
     if isinstance(tags, str):
         try:
@@ -98,15 +110,40 @@ def _is_excluded_category(market: dict, excluded_keywords: frozenset[str]) -> bo
             if isinstance(tag, dict)
             else str(tag).lower()
         )
-        for keyword in excluded_keywords:
-            if keyword in label:
-                return True
+        if label:
+            parts.append(label)
 
-    for field in ("slug", "groupItemTitle", "category", "question", "description"):
-        value = (market.get(field) or "").lower()
-        for keyword in excluded_keywords:
-            if keyword in value:
-                return True
+    for field in (
+        "slug",
+        "groupItemTitle",
+        "category",
+        "question",
+        "description",
+        "title",
+    ):
+        value = str(market.get(field) or "").lower()
+        if value:
+            parts.append(value)
+
+    events = market.get("events") or []
+    if isinstance(events, list):
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            for fld in ("title", "slug", "subtitle", "description", "name"):
+                value = str(event.get(fld) or "").lower()
+                if value:
+                    parts.append(value)
+    return "\n".join(parts)
+
+
+def _is_excluded_category(market: dict, excluded_keywords: frozenset[str]) -> bool:
+    if not excluded_keywords:
+        return False
+    blob = _market_keyword_exclusion_blob(market)
+    for keyword in excluded_keywords:
+        if keyword in blob:
+            return True
     return False
 
 
@@ -121,9 +158,44 @@ def _is_binary_yes_no(market: dict) -> bool:
 def _has_excluded_title_phrase(market: dict, excluded_title_phrases: frozenset[str]) -> bool:
     if not excluded_title_phrases:
         return False
-    for field in ("question", "groupItemTitle"):
+    for field in ("question", "groupItemTitle", "title"):
         value = str(market.get(field) or "").lower()
         if any(phrase in value for phrase in excluded_title_phrases):
+            return True
+    return False
+
+
+def is_market_text_excluded(
+    market: dict,
+    *,
+    excluded_keywords: frozenset[str],
+    excluded_title_phrases: frozenset[str],
+) -> bool:
+    """True when market text matches excluded_keywords or excluded_title_phrases."""
+    if _has_excluded_title_phrase(market, excluded_title_phrases):
+        return True
+    if _is_excluded_category(market, excluded_keywords):
+        return True
+    return False
+
+
+def standalone_market_matches_text_exclusions(
+    market: StandaloneMarket,
+    *,
+    excluded_keywords: frozenset[str],
+    excluded_title_phrases: frozenset[str],
+) -> bool:
+    """Same exclusion rules as `is_market_text_excluded`, using fields on ``StandaloneMarket``."""
+    if not excluded_keywords and not excluded_title_phrases:
+        return False
+    title_phrase_blob = "\n".join(
+        part.lower() for part in (market.question, market.category) if part
+    )
+    for phrase in excluded_title_phrases:
+        if phrase in title_phrase_blob:
+            return True
+    for kw in excluded_keywords:
+        if kw in market.keyword_exclusion_blob:
             return True
     return False
 
@@ -173,9 +245,11 @@ def _passes_candidate_filters(
         return False
     if _is_sports_market(market):
         return False
-    if _has_excluded_title_phrase(market, excluded_title_phrases):
-        return False
-    if _is_excluded_category(market, excluded_keywords):
+    if is_market_text_excluded(
+        market,
+        excluded_keywords=excluded_keywords,
+        excluded_title_phrases=excluded_title_phrases,
+    ):
         return False
     if not _ends_within_window(market, max_end_date_months=max_end_date_months):
         return False
@@ -222,7 +296,7 @@ def build_standalone_market(market: dict) -> StandaloneMarket | None:
         or ""
     )
     return StandaloneMarket(
-        question=str(market.get("question") or ""),
+        question=str(market.get("question") or market.get("title") or ""),
         slug=str(market.get("slug") or ""),
         condition_id=str(market.get("conditionId") or ""),
         yes_token_id=yes_token_id,
@@ -236,6 +310,7 @@ def build_standalone_market(market: dict) -> StandaloneMarket | None:
         end_ts=_parse_iso_ts(end_date),
         category=str(market.get("groupItemTitle") or market.get("category") or ""),
         event_slug=_get_event_slug(market),
+        keyword_exclusion_blob=_market_keyword_exclusion_blob(market),
         created_at_ts=_parse_iso_ts(created_raw),
         end_date_ts=_parse_iso_ts(end_date),
     )
@@ -452,57 +527,123 @@ async def fetch_candidate_markets(
     return markets
 
 
+def _raw_market_contains_clob_token(raw_market: dict, token_id: str) -> bool:
+    tid = str(token_id).strip()
+    if not tid:
+        return False
+    for entry in _load_json_list(raw_market.get("clobTokenIds")):
+        if str(entry).strip() == tid:
+            return True
+    return False
+
+
 async def fetch_markets_by_token_ids(
     session: aiohttp.ClientSession,
     token_ids: list[str],
-) -> list[StandaloneMarket]:
+    *,
+    excluded_keywords: frozenset[str] = frozenset(),
+    excluded_title_phrases: frozenset[str] = frozenset(),
+) -> MarketsByTokensResult:
     if not token_ids:
-        return []
-    
+        return MarketsByTokensResult(markets=tuple(), excluded_no_token_ids=frozenset())
+
     markets: list[StandaloneMarket] = []
-    
-    # Chunk token IDs to avoid massive URLs (e.g. 50 at a time)
-    chunk_size = 50
-    for i in range(0, len(token_ids), chunk_size):
-        chunk = token_ids[i:i + chunk_size]
-        query_param = ",".join(chunk)
-        url = f"{GAMMA_API}/markets?clobTokenIds={query_param}"
-        
+    excluded_no: set[str] = set()
+    seen_no_tokens: set[str] = set()
+
+    # Gamma expects ``clob_token_ids`` (snake_case). The camelCase param is ignored and
+    # returns an arbitrary market, which breaks open-order recovery and exclusions.
+    for token_id in token_ids:
         retries = 0
+        raw_match: dict | None = None
         while retries < PAGE_MAX_RETRIES:
             try:
-                async with session.get(url, headers={"User-Agent": "polymarket-scanner/1.0"}, timeout=15.0) as resp:
+                async with session.get(
+                    f"{GAMMA_API}/markets",
+                    params={"clob_token_ids": str(token_id).strip()},
+                    headers={"User-Agent": "polymarket-scanner/1.0"},
+                    timeout=15.0,
+                ) as resp:
                     resp.raise_for_status()
                     batch = await resp.json()
-                    
-                    if isinstance(batch, list):
-                        for raw_market in batch:
-                            market = build_standalone_market(raw_market)
-                            if market is not None:
-                                markets.append(market)
-                    break # Success, break retry loop
-                    
+
+                if isinstance(batch, list):
+                    for raw_market in batch:
+                        if isinstance(raw_market, dict) and _raw_market_contains_clob_token(
+                            raw_market, token_id
+                        ):
+                            raw_match = raw_market
+                            break
+                if raw_match is None:
+                    logger.warning(
+                        "gamma_markets_by_token_unresolved token_prefix=%s batch_len=%s",
+                        str(token_id)[:16],
+                        len(batch) if isinstance(batch, list) else type(batch).__name__,
+                    )
+                break
+
             except aiohttp.ClientResponseError as exc:
                 if exc.status == 429:
                     retry_after = _parse_retry_after_seconds(exc.headers)
                     delay = retry_after if retry_after is not None else min(
-                        PAGE_RETRY_BASE_DELAY_SEC * (2 ** retries),
+                        PAGE_RETRY_BASE_DELAY_SEC * (2**retries),
                         PAGE_RETRY_MAX_DELAY_SEC,
                     )
                     retries += 1
-                    logger.warning("gamma_markets_by_token_rate_limited retry=%d delay=%.2f", retries, delay)
+                    logger.warning(
+                        "gamma_markets_by_token_rate_limited retry=%d delay=%.2f", retries, delay
+                    )
                     await asyncio.sleep(delay)
                     continue
-                else:
-                    logger.warning("gamma_markets_by_token_aborted status=%s err=%s", exc.status, exc)
-                    break
+                logger.warning("gamma_markets_by_token_aborted status=%s err=%s", exc.status, exc)
+                break
             except asyncio.TimeoutError:
-                logger.warning("gamma_markets_by_token_timeout")
+                logger.warning("gamma_markets_by_token_timeout token_prefix=%s", str(token_id)[:16])
                 retries += 1
                 await asyncio.sleep(1.0)
                 continue
             except Exception as exc:
-                logger.warning("gamma_markets_by_token_failed err=%s", exc)
+                logger.warning(
+                    "gamma_markets_by_token_failed token_prefix=%s err=%s",
+                    str(token_id)[:16],
+                    exc,
+                )
                 break
-                
-    return markets
+
+        if raw_match is None:
+            continue
+
+        _, no_tid = _parse_token_pair(raw_match)
+        if (
+            excluded_keywords or excluded_title_phrases
+        ) and is_market_text_excluded(
+            raw_match,
+            excluded_keywords=excluded_keywords,
+            excluded_title_phrases=excluded_title_phrases,
+        ):
+            # Use the requested token so callers can cancel via ``missing_tokens[token_id]``.
+            excluded_no.add(str(token_id).strip())
+            if no_tid and no_tid != str(token_id).strip():
+                excluded_no.add(no_tid)
+            logger.info(
+                "gamma_markets_by_token_skip_excluded slug=%s",
+                raw_match.get("slug") or "",
+            )
+            continue
+
+        market = build_standalone_market(raw_match)
+        if market is None or not market.no_token_id:
+            logger.warning(
+                "gamma_markets_by_token_build_failed slug=%s",
+                raw_match.get("slug") or "",
+            )
+            continue
+        if market.no_token_id in seen_no_tokens:
+            continue
+        seen_no_tokens.add(market.no_token_id)
+        markets.append(market)
+
+    return MarketsByTokensResult(
+        markets=tuple(markets),
+        excluded_no_token_ids=frozenset(excluded_no),
+    )

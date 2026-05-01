@@ -39,6 +39,13 @@ def test_load_nothing_happens_config_requires_strategy_section(tmp_path, monkeyp
         load_nothing_happens_config()
 
 
+def test_load_nothing_happens_config_env_strict_portfolio_pct_cap(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, _base_config()))
+    monkeypatch.setenv("PM_NH_STRICT_PORTFOLIO_PCT_CAP", "true")
+    _, strategy = load_nothing_happens_config()
+    assert strategy.strict_portfolio_pct_cap is True
+
+
 def test_load_nothing_happens_config_rejects_unsupported_strategy_selector(
     tmp_path,
     monkeypatch,
@@ -61,6 +68,7 @@ def test_load_nothing_happens_config_defaults(tmp_path, monkeypatch) -> None:
     assert strategy.fixed_trade_amount == 0.0
     assert strategy.max_entry_price == 0.65
     assert strategy.max_new_positions == -1
+    assert strategy.strict_portfolio_pct_cap is False
 
 
 def test_load_nothing_happens_config_applies_env_overrides(tmp_path, monkeypatch) -> None:

@@ -7,10 +7,11 @@ import aiohttp
 import pytest
 
 from bot.config import NothingHappensConfig
-from bot.models import OrderBookLevel, OrderBookSnapshot
+from bot.models import OpenOrder, OrderBookLevel, OrderBookSnapshot, Side
 from bot.nothing_happens_control import NothingHappensControlState
 from bot.portfolio_state import PositionSnapshot
 from bot.risk_controls import RiskConfig, RiskController
+from bot.standalone_markets import _market_keyword_exclusion_blob
 from bot.standalone_markets import build_standalone_market
 from bot.standalone_markets import filter_standalone_markets
 from bot.standalone_markets import StandaloneMarket
@@ -18,6 +19,7 @@ from bot.standalone_markets import fetch_all_open_markets
 from bot.standalone_markets import fetch_candidate_markets
 from bot.strategy.nothing_happens import (
     NothingHappensRuntime,
+    PendingEntry,
     _bid_depth_notional,
     _fetch_open_positions,
 )
@@ -78,6 +80,33 @@ class StubExchange:
     def cancel_order(self, order_id: str) -> bool:
         return True
 
+    def get_all_open_orders(self) -> list:
+        return []
+
+    def get_open_orders(self, token_id: str) -> list:
+        get_all_fn = getattr(self, "get_all_open_orders", None)
+        if not callable(get_all_fn):
+            return []
+        try:
+            all_orders = get_all_fn()
+        except Exception:
+            return []
+        tid = str(token_id)
+        return [o for o in all_orders if str(getattr(o, "token_id", "")) == tid]
+
+    def get_all_open_orders(self) -> list:
+        return []
+
+    def get_open_orders(self, token_id: str) -> list:
+        get_all_fn = getattr(self, "get_all_open_orders", None)
+        if not callable(get_all_fn):
+            return []
+        try:
+            all_orders = get_all_fn()
+        except Exception:
+            return []
+        tid = str(token_id)
+        return [o for o in all_orders if str(getattr(o, "token_id", "")) == tid]
 
 class SequencedExchange(StubExchange):
     def __init__(self, *, order_steps: list, **kwargs) -> None:
@@ -139,6 +168,14 @@ class StubRecoveryCoordinator:
 
 
 def _make_market(*, slug: str = "will-it-rain") -> StandaloneMarket:
+    keyword_exclusion_blob = _market_keyword_exclusion_blob(
+        {
+            "slug": slug,
+            "question": "Will it rain?",
+            "category": "Weather",
+            "events": [{"slug": slug}],
+        }
+    )
     return StandaloneMarket(
         question="Will it rain?",
         slug=slug,
@@ -154,6 +191,7 @@ def _make_market(*, slug: str = "will-it-rain") -> StandaloneMarket:
         end_ts=_FUTURE_END_TS,
         category="Weather",
         event_slug=slug,
+        keyword_exclusion_blob=keyword_exclusion_blob,
         end_date_ts=_FUTURE_END_TS,
     )
 
@@ -930,6 +968,79 @@ def test_target_notional_converts_share_minimums_to_usd() -> None:
     assert target_notional == pytest.approx(10.0)
 
 
+def test_target_notional_breakdown_exposes_exchange_minimum_usd() -> None:
+    runtime = _make_runtime(
+        cfg=NothingHappensConfig(
+            portfolio_pct_per_trade=0.01,
+            min_trade_amount=1.0,
+            fixed_trade_amount=0.0,
+        )
+    )
+    bd = runtime._target_notional_breakdown(
+        portfolio_value=1000.0,
+        submitted_price=0.94,
+        market_min_order_size=15.0,
+        book_min_order_size=15.0,
+    )
+    assert bd.base_floor_usd == pytest.approx(10.0)
+    assert bd.exchange_minimum_usd == pytest.approx(15.0 * 0.94)
+    assert bd.target_notional == bd.exchange_minimum_usd
+
+
+@pytest.mark.asyncio
+async def test_build_entry_plan_strict_pct_cap_skips_when_exchange_minimum_exceeds_floor() -> None:
+    slug = "strict-portfolio-cap"
+    m = _make_market(slug=slug)
+    exchange = StubExchange(
+        order_books={
+            m.no_token_id: _make_book(
+                token_id=m.no_token_id,
+                bid_price=0.94,
+                ask_price=0.96,
+                ask_size=500.0,
+                min_order_size=15.0,
+            )
+        }
+    )
+    runtime = _make_runtime(
+        exchange=exchange,
+        cfg=NothingHappensConfig(
+            portfolio_pct_per_trade=0.01,
+            min_trade_amount=1.0,
+            max_entry_price=0.95,
+            allowed_slippage=0.30,
+            strict_portfolio_pct_cap=True,
+        ),
+    )
+    runtime._cash_balance = 1000.0
+    runtime._positions_by_slug.clear()
+    market = StandaloneMarket(
+        question=m.question,
+        slug=m.slug,
+        condition_id=m.condition_id,
+        yes_token_id=m.yes_token_id,
+        no_token_id=m.no_token_id,
+        yes_price=m.yes_price,
+        no_price=m.no_price,
+        volume=m.volume,
+        liquidity=m.liquidity,
+        min_order_size=15.0,
+        end_date=m.end_date,
+        end_ts=m.end_ts,
+        category=m.category,
+        event_slug=m.event_slug,
+        keyword_exclusion_blob=m.keyword_exclusion_blob,
+    )
+
+    plan = await runtime._build_entry_plan(
+        market,
+        exchange.order_books[m.no_token_id],
+        enforce_risk=False,
+    )
+
+    assert plan is None
+
+
 @pytest.mark.asyncio
 async def test_build_entry_plan_uses_submitted_price_for_share_minimums() -> None:
     market = _make_market(slug="share-minimum")
@@ -967,6 +1078,7 @@ async def test_build_entry_plan_uses_submitted_price_for_share_minimums() -> Non
         end_ts=market.end_ts,
         category=market.category,
         event_slug=market.event_slug,
+        keyword_exclusion_blob=market.keyword_exclusion_blob,
     )
 
     plan = await runtime._build_entry_plan(
@@ -1093,3 +1205,69 @@ async def test_fetch_candidate_markets_streams_batches_without_full_snapshot() -
 
     assert [market.slug for market in markets] == ["will-it-rain"]
     assert session.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_attempt_entry_precheck_submitted_status_skips_post() -> None:
+    market = _make_market(slug="precheck-submitted-status")
+    book = _make_book(token_id=market.no_token_id)
+    ex = StubExchange(order_books={market.no_token_id: book})
+    ex.get_all_open_orders = lambda: [
+        OpenOrder(
+            order_id="0xsub1",
+            token_id=market.no_token_id,
+            side=Side.BUY,
+            price=book.bids[0].price,
+            status="submitted",
+        ),
+    ]
+    rt = _make_runtime(exchange=ex)
+    rt._cash_balance = 500.0
+    pend = PendingEntry(market=market, enqueued_at_ts=0.0, next_attempt_monotonic=0.0)
+    rt._pending_entries_by_slug[market.slug] = pend
+
+    result = await rt._attempt_entry(market, book, book.bids[0].price, 10.0)
+    assert result.open_limit_pending is True
+    assert pend.order_id == "0xsub1"
+    assert not ex.limit_orders
+
+
+    market = _make_market(slug="precheck-dupe-buy")
+    book = _make_book(token_id=market.no_token_id)
+    cancelled: list[str] = []
+    ex = StubExchange(order_books={market.no_token_id: book})
+    orig_cancel = ex.cancel_order
+
+    def cancel_order_tracking(order_id: str) -> bool:
+        cancelled.append(order_id)
+        return orig_cancel(order_id)
+
+    ex.cancel_order = cancel_order_tracking  # type: ignore[method-assign]
+
+    ex.get_all_open_orders = lambda: [
+        OpenOrder(
+            order_id="0xaaakeep",
+            token_id=market.no_token_id,
+            side=Side.BUY,
+            price=book.bids[0].price,
+            status="live",
+        ),
+        OpenOrder(
+            order_id="0xzzzextra",
+            token_id=market.no_token_id,
+            side=Side.BUY,
+            price=book.bids[0].price,
+            status="live",
+        ),
+    ]
+
+    rt = _make_runtime(exchange=ex)
+    rt._cash_balance = 500.0
+    pend = PendingEntry(market=market, enqueued_at_ts=0.0, next_attempt_monotonic=0.0)
+    rt._pending_entries_by_slug[market.slug] = pend
+
+    result = await rt._attempt_entry(market, book, book.bids[0].price, 12.34)
+    assert result.open_limit_pending is True
+    assert pend.order_id == "0xaaakeep"
+    assert cancelled == ["0xzzzextra"]
+    assert not ex.limit_orders
