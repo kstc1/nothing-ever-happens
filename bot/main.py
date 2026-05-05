@@ -75,7 +75,7 @@ def _build_exchange(exchange_cfg, strategy_cfg):
 def _resolve_live_wallet_address(exchange_cfg) -> str | None:
     if not exchange_cfg.live_send_enabled:
         return None
-    if exchange_cfg.signature_type in {1, 2}:
+    if exchange_cfg.signature_type in {1, 2, 3}:
         return exchange_cfg.funder_address
     if exchange_cfg.signature_type != 0 or not exchange_cfg.private_key:
         return None
@@ -178,17 +178,16 @@ async def run():
 
     dashboard_port = os.getenv("PORT") or os.getenv("DASHBOARD_PORT")
     dashboard_task = None
+    dashboard_server = None
     if dashboard_port:
         from bot.dashboard import DashboardServer
 
-        dashboard = DashboardServer(
+        dashboard_server = DashboardServer(
             portfolio_state=portfolio_state,
             nothing_happens_control=nothing_happens_control,
             port=int(dashboard_port),
             exchange=exchange,
         )
-        dashboard_task = asyncio.create_task(dashboard.run(), name="dashboard")
-        logger.info("dashboard_starting", extra={"port": int(dashboard_port)})
 
     shutdown = asyncio.Event()
 
@@ -203,13 +202,24 @@ async def run():
         except NotImplementedError:
             pass  # add_signal_handler is not supported on Windows
 
+    async def _start_dashboard() -> None:
+        nonlocal dashboard_task
+        if dashboard_server is None or dashboard_task is not None:
+            return
+        dashboard_task = asyncio.create_task(dashboard_server.run(), name="dashboard")
+        logger.info("dashboard_starting", extra={"port": int(dashboard_port)})
+
     async with aiohttp.ClientSession() as session:
         if redeemer is not None:
             redeemer._session = session
 
+        if not exchange_cfg.live_send_enabled:
+            await _start_dashboard()
+
         if exchange_cfg.live_send_enabled:
             await asyncio.to_thread(exchange.bootstrap_live_trading, None)
             logger.info("exchange_bootstrapped")
+            await _start_dashboard()
             if risk.cfg.max_daily_drawdown_usd > 0:
                 try:
                     startup_balance = await asyncio.to_thread(exchange.get_collateral_balance)

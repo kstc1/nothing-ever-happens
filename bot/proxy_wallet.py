@@ -177,8 +177,11 @@ def _approve_operator(
         raise RuntimeError(
             "Proxy conditional-token approval failed while hashing the Safe transaction (getTransactionHash reverted). "
             "Confirm FUNDER_ADDRESS is the Polymarket Gnosis Safe / proxy for this account, PRIVATE_KEY is an owner of "
-            "that Safe, and config connection.signature_type matches Polymarket (0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE). "
-            "Complete Polymarket wallet onboarding in the browser if you have not."
+            "that Safe, and config connection.signature_type matches Polymarket (0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE, "
+            "3=POLY_1271 deposit wallet). "
+            "Complete Polymarket wallet onboarding in the browser if you have not. "
+            "If conditional-token operators are already approved on-chain for this proxy, set "
+            "PM_NH_SKIP_SAFE_APPROVAL_BOOTSTRAP=1 to skip this step."
         ) from exc
 
     signed_message = Account.sign_message(

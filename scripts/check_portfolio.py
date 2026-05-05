@@ -14,7 +14,7 @@ def main():
     
     clob = PolymarketClobExchangeClient(e, allow_trading=True, clob_rate_limit_rps=5.0, clob_rate_limit_burst=10.0)
     
-    wallet = e.funder_address if e.signature_type in (1,2) and e.funder_address else "unknown"
+    wallet = e.funder_address if e.signature_type in (1, 2, 3) and e.funder_address else "unknown"
     print(f"Wallet: {wallet}")
     
     # Fetch positions from Gamma API

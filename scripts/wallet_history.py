@@ -39,7 +39,7 @@ def resolve_default_wallet() -> str | None:
         from bot.config import load_nothing_happens_config
 
         exchange_cfg, _ = load_nothing_happens_config()
-        if exchange_cfg.signature_type in {1, 2} and exchange_cfg.funder_address:
+        if exchange_cfg.signature_type in {1, 2, 3} and exchange_cfg.funder_address:
             return exchange_cfg.funder_address
         if exchange_cfg.signature_type == 0 and exchange_cfg.private_key:
             from eth_account import Account

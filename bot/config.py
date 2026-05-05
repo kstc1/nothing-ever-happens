@@ -110,9 +110,10 @@ class ExchangeConfig:
     live_send_enabled: bool = False
 
     def validate(self) -> None:
-        if self.signature_type not in {0, 1, 2}:
+        if self.signature_type not in {0, 1, 2, 3}:
             raise ValueError(
-                f"connection.signature_type must be 0, 1, or 2, got {self.signature_type}"
+                "connection.signature_type must be 0 (EOA), 1 (POLY_PROXY), 2 (GNOSIS_SAFE), "
+                f"or 3 (POLY_1271 deposit wallet), got {self.signature_type}"
             )
         if self.live_send_enabled and not self.private_key:
             raise ValueError(
@@ -121,12 +122,12 @@ class ExchangeConfig:
             )
         if (
             self.live_send_enabled
-            and self.signature_type in {1, 2}
+            and self.signature_type in {1, 2, 3}
             and not self.funder_address
         ):
             raise ValueError(
                 "FUNDER_ADDRESS is required in live mode with signature_type "
-                f"{self.signature_type} (proxy/delegated wallet)"
+                f"{self.signature_type} (proxy, Safe, or deposit wallet address)"
             )
         if (
             self.live_send_enabled

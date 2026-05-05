@@ -453,6 +453,17 @@ class PolymarketClobExchangeClient:
         if not self.private_key:
             return
 
+        if self.signature_type == 3 and self.funder_address:
+            logger.info(
+                "deposit_wallet_bootstrap_note",
+                extra={
+                    "proxy_address": self.funder_address,
+                    "detail": "Deposit wallet (POLY_1271): fund the funder with pUSD, run conditional-token and "
+                    "collateral approvals as relayer WALLET batches from that wallet (not this bot). "
+                    "See https://docs.polymarket.com/trading/deposit-wallet-migration",
+                },
+            )
+
         if self.signature_type == 2 and self.funder_address:
             if not self.rpc_url:
                 raise ValueError("POLYGON_RPC_URL is required for proxy-wallet approval bootstrap")
