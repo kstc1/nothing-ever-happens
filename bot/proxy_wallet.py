@@ -1,8 +1,12 @@
+import logging
+
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from requests import HTTPError
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
+
+logger = logging.getLogger(__name__)
 
 CT_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
@@ -95,6 +99,14 @@ def ensure_conditional_token_approvals(
 
     signer = Account.from_key(private_key)
     proxy = Web3.to_checksum_address(proxy_address)
+    proxy_bytecode = w3.eth.get_code(proxy)
+    if not proxy_bytecode:
+        raise RuntimeError(
+            "FUNDER_ADDRESS has no contract on Polygon (empty bytecode). For signature_type=2, "
+            "set FUNDER_ADDRESS to your Polymarket proxy wallet (Gnosis Safe) from the Polymarket UI — "
+            "not your standalone EOA address."
+        )
+
     ct_address = Web3.to_checksum_address(CT_ADDRESS)
     ct = w3.eth.contract(address=ct_address, abi=CT_ABI)
     safe = w3.eth.contract(address=proxy, abi=SAFE_ABI)
@@ -137,18 +149,37 @@ def _approve_operator(
 ) -> None:
     call_data = ct.functions.setApprovalForAll(operator, True)._encode_transaction_data()
     safe_nonce = int(safe.functions.nonce().call())
-    safe_tx_hash = safe.functions.getTransactionHash(
-        ct_address,
-        0,
-        call_data,
-        0,
-        0,
-        0,
-        0,
-        ZERO_ADDRESS,
-        ZERO_ADDRESS,
-        safe_nonce,
-    ).call()
+    try:
+        safe_tx_hash = safe.functions.getTransactionHash(
+            ct_address,
+            0,
+            call_data,
+            0,
+            0,
+            0,
+            0,
+            ZERO_ADDRESS,
+            ZERO_ADDRESS,
+            safe_nonce,
+        ).call()
+    except Exception as exc:
+        logger.error(
+            "safe_get_transaction_hash_failed",
+            extra={
+                "proxy": getattr(safe, "address", None),
+                "signer_eoa": signer_address,
+                "operator": operator,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            },
+            exc_info=True,
+        )
+        raise RuntimeError(
+            "Proxy conditional-token approval failed while hashing the Safe transaction (getTransactionHash reverted). "
+            "Confirm FUNDER_ADDRESS is the Polymarket Gnosis Safe / proxy for this account, PRIVATE_KEY is an owner of "
+            "that Safe, and config connection.signature_type matches Polymarket (0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE). "
+            "Complete Polymarket wallet onboarding in the browser if you have not."
+        ) from exc
 
     signed_message = Account.sign_message(
         encode_defunct(hexstr=Web3.to_hex(safe_tx_hash)),

@@ -20,9 +20,11 @@ def main():
     else:
         print("Failed to fetch Gamma API orders")
         
-    res2 = requests.get(f"https://clob.polymarket.com/orders?maker={funder}&status=OPEN")
-    print("CLOB Open Orders HTTP response:")
-    print(res2.json())
+    # CLOB v2 lists orders at /data/orders with L2 (API key) auth — not public GET /orders.
+    print(
+        "For authenticated CLOB v2 open orders use: python scripts/check_open_orders.py "
+        "(host https://clob.polymarket.com + paths like /data/orders from py_clob_client_v2)."
+    )
 
 if __name__ == "__main__":
     main()

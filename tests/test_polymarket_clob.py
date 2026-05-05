@@ -318,6 +318,36 @@ def test_place_market_order_sell_records_fill_price_in_probability_units() -> No
     assert result.raw["_fill_price"] == pytest.approx(3.081 / 10.27)
 
 
+def test_bootstrap_live_trading_skips_proxy_approval_when_env_set(monkeypatch) -> None:
+    approval_calls: list[int] = []
+
+    def _fake_ensure_conditional_token_approvals(*, private_key, proxy_address, chain_id, rpc_url):
+        approval_calls.append(1)
+        return 2
+
+    monkeypatch.setattr(
+        polymarket_clob,
+        "ensure_conditional_token_approvals",
+        _fake_ensure_conditional_token_approvals,
+    )
+    monkeypatch.setenv("PM_NH_SKIP_SAFE_APPROVAL_BOOTSTRAP", "true")
+
+    client = object.__new__(PolymarketClobExchangeClient)
+    client.private_key = SecretStr("0xabc")
+    client.signature_type = 2
+    client.funder_address = "0xfunder"
+    client.chain_id = 137
+    client.rpc_url = "https://polygon-rpc.example"
+    client._asset_type = SimpleNamespace(COLLATERAL="COLLATERAL", CONDITIONAL="CONDITIONAL")
+    client._balance_allowance_params = lambda **kwargs: SimpleNamespace(**kwargs)
+    client.client = _MarketOrderStubClient()
+
+    client.bootstrap_live_trading("token")
+
+    assert approval_calls == []
+    assert len(client.client.update_calls) == 2
+
+
 def test_bootstrap_live_trading_ensures_proxy_approval_and_syncs_cache(monkeypatch) -> None:
     approval_calls = []
 

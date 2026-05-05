@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from typing import Any
 
@@ -19,6 +20,12 @@ from bot.models import (
 from bot.proxy_wallet import ensure_conditional_token_approvals
 
 logger = logging.getLogger(__name__)
+
+
+def _env_truthy(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 DEFAULT_ALLOWED_SLIPPAGE = 0.05
 SELL_BALANCE_SYNC_DELAY = 1.0
 SELL_RETRY_DELAY = 2.0
@@ -449,19 +456,28 @@ class PolymarketClobExchangeClient:
         if self.signature_type == 2 and self.funder_address:
             if not self.rpc_url:
                 raise ValueError("POLYGON_RPC_URL is required for proxy-wallet approval bootstrap")
-            approvals_set = ensure_conditional_token_approvals(
-                private_key=self.private_key.get_secret_value() if self.private_key else "",
-                proxy_address=self.funder_address,
-                chain_id=self.chain_id,
-                rpc_url=self.rpc_url,
-            )
-            logger.info(
-                "proxy_ct_approvals_checked",
-                extra={
-                    "proxy_address": self.funder_address,
-                    "approvals_set": approvals_set,
-                },
-            )
+            if _env_truthy("PM_NH_SKIP_SAFE_APPROVAL_BOOTSTRAP"):
+                logger.warning(
+                    "proxy_ct_approval_bootstrap_skipped",
+                    extra={
+                        "reason": "PM_NH_SKIP_SAFE_APPROVAL_BOOTSTRAP is set",
+                        "proxy_address": self.funder_address,
+                    },
+                )
+            else:
+                approvals_set = ensure_conditional_token_approvals(
+                    private_key=self.private_key.get_secret_value() if self.private_key else "",
+                    proxy_address=self.funder_address,
+                    chain_id=self.chain_id,
+                    rpc_url=self.rpc_url,
+                )
+                logger.info(
+                    "proxy_ct_approvals_checked",
+                    extra={
+                        "proxy_address": self.funder_address,
+                        "approvals_set": approvals_set,
+                    },
+                )
 
         if not self._sync_balance_allowance(self._asset_type.COLLATERAL):
             raise RuntimeError("Bootstrap failed: could not sync COLLATERAL balance allowance")

@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 from bot.config import _load_nothing_happens_config
 from bot.exchange.polymarket_clob import PolymarketClobExchangeClient
-from py_clob_client.clob_types import OrderArgs, OrderType
+from py_clob_client_v2.clob_types import OrderType
 
 def main():
     load_dotenv()
