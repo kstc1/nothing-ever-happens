@@ -543,7 +543,7 @@ class NothingHappensRuntime:
             await self._sleep_or_shutdown(sleep_for)
 
     async def _open_order_poll_loop(self) -> None:
-        """Poll pending GTC limit orders; confirm fills or cancel stale orders."""
+        """Poll pending entry limit orders; confirm fills or cancel stale BUY rests."""
         while not self.shutdown_event.is_set():
             try:
                 open_orders = await self._get_all_open_orders_list()
@@ -695,7 +695,12 @@ class NothingHappensRuntime:
                     )
                 continue
 
-            if pending.order_placed_at_ts and (now_ts - pending.order_placed_at_ts) > self.cfg.limit_order_max_age_sec:
+            # limit_order_max_age_sec only refreshes (cancels) entry BUY rests; leave SELL orders untouched.
+            if (
+                pending.order_placed_at_ts
+                and (now_ts - pending.order_placed_at_ts) > self.cfg.limit_order_max_age_sec
+                and order.side == Side.BUY
+            ):
                 cancel_success = False
                 try:
                     cancel_success = await asyncio.wait_for(
@@ -838,6 +843,8 @@ class NothingHappensRuntime:
             async with self._entry_lock:
                 for order in open_orders:
                     if not is_resting_polymarket_order_status(order.status):
+                        continue
+                    if order.side != Side.BUY:
                         continue
                     found = False
                     for slug, market in self._markets_by_slug.items():

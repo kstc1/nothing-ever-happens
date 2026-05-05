@@ -1092,6 +1092,65 @@ async def test_build_entry_plan_uses_submitted_price_for_share_minimums() -> Non
     assert plan.target_notional == pytest.approx(5.9)
 
 
+@pytest.mark.asyncio
+async def test_stale_limit_refresh_cancels_only_buy_orders() -> None:
+    """limit_order_max_age_sec cancels stale BUY entry rests only; not SELL orders."""
+    import bot.strategy.nothing_happens as nh_strategy
+
+    frozen_now = 1_700_000_000
+    stale_ts = frozen_now - 86_400
+
+    mb = _make_market(slug="entry-buy")
+    ms = _make_market(slug="sell-track")
+    resting = [
+        OpenOrder(order_id="o-buy", token_id=mb.no_token_id, side=Side.BUY, price=0.5, status="live"),
+        OpenOrder(order_id="o-sell", token_id=ms.no_token_id, side=Side.SELL, price=0.9, status="live"),
+    ]
+
+    class RecordingExchange(StubExchange):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cancelled: list[str] = []
+
+        def get_all_open_orders(self) -> list:
+            return resting
+
+        def cancel_order(self, order_id: str) -> bool:
+            self.cancelled.append(order_id)
+            return True
+
+    rx = RecordingExchange()
+
+    rt = _make_runtime(
+        exchange=rx,
+        cfg=NothingHappensConfig(limit_order_max_age_sec=300.0),
+    )
+    rt._markets_by_slug = {mb.slug: mb, ms.slug: ms}
+    rt._pending_entries_by_slug = {
+        mb.slug: PendingEntry(
+            market=mb,
+            enqueued_at_ts=stale_ts,
+            next_attempt_monotonic=0.0,
+            order_id="o-buy",
+            order_placed_at_ts=stale_ts,
+        ),
+        ms.slug: PendingEntry(
+            market=ms,
+            enqueued_at_ts=stale_ts,
+            next_attempt_monotonic=0.0,
+            order_id="o-sell",
+            order_placed_at_ts=stale_ts,
+        ),
+    }
+
+    with patch.object(nh_strategy.time, "time", return_value=frozen_now):
+        await rt._poll_open_limit_orders(prefetched_open=list(resting))
+
+    assert rx.cancelled == ["o-buy"]
+    assert mb.slug not in rt._pending_entries_by_slug
+    assert ms.slug in rt._pending_entries_by_slug
+
+
 def test_record_local_fill_sets_shutdown_after_max_new_positions() -> None:
     shutdown_event = asyncio.Event()
     runtime = NothingHappensRuntime(

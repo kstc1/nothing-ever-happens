@@ -144,7 +144,7 @@ body::before {
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.5fr) minmax(360px, 0.9fr);
+  grid-template-columns: 1fr;
   gap: 18px;
 }
 
@@ -374,10 +374,6 @@ th[data-sort].sort-desc::after {
 @media (max-width: 1080px) {
   .summary-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .layout {
-    grid-template-columns: 1fr;
   }
 }
 
