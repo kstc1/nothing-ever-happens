@@ -11,7 +11,6 @@ from bot.models import OpenOrder, OrderBookLevel, OrderBookSnapshot, Side
 from bot.nothing_happens_control import NothingHappensControlState
 from bot.portfolio_state import PositionSnapshot
 from bot.risk_controls import RiskConfig, RiskController
-from bot.standalone_markets import _market_keyword_exclusion_blob
 from bot.standalone_markets import build_standalone_market
 from bot.standalone_markets import filter_standalone_markets
 from bot.standalone_markets import StandaloneMarket
@@ -168,14 +167,6 @@ class StubRecoveryCoordinator:
 
 
 def _make_market(*, slug: str = "will-it-rain") -> StandaloneMarket:
-    keyword_exclusion_blob = _market_keyword_exclusion_blob(
-        {
-            "slug": slug,
-            "question": "Will it rain?",
-            "category": "Weather",
-            "events": [{"slug": slug}],
-        }
-    )
     return StandaloneMarket(
         question="Will it rain?",
         slug=slug,
@@ -191,7 +182,7 @@ def _make_market(*, slug: str = "will-it-rain") -> StandaloneMarket:
         end_ts=_FUTURE_END_TS,
         category="Weather",
         event_slug=slug,
-        keyword_exclusion_blob=keyword_exclusion_blob,
+        keyword_exclusion_blob="",
         end_date_ts=_FUTURE_END_TS,
     )
 

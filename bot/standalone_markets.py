@@ -29,6 +29,12 @@ PAGE_MAX_RETRIES = 8
 PAGE_RETRY_BASE_DELAY_SEC = 1.0
 PAGE_RETRY_MAX_DELAY_SEC = 30.0
 GC_COLLECT_INTERVAL_PAGES = 20
+TAG_FETCH_CONCURRENCY = 3
+TAG_FETCH_TIMEOUT_SEC = 15.0
+TAG_FETCH_MIN_RETRY_DELAY_SEC = 1.0
+
+# Cached on raw market dict during async discovery / token recovery (see Gamma /markets/{id}/tags).
+_RESOLVED_TAG_BLOB_KEY = "_resolved_tag_keyword_blob"
 
 class GammaMarketFetchError(RuntimeError):
     pass
@@ -36,6 +42,8 @@ class GammaMarketFetchError(RuntimeError):
 
 @dataclass(frozen=True)
 class StandaloneMarket:
+    """Snapshot of a yes/no market. ``keyword_exclusion_blob`` holds tag text only (labels/slugs) for ``excluded_keywords``."""
+
     question: str
     slug: str
     condition_id: str
@@ -92,57 +100,156 @@ def _parse_iso_ts(value: str) -> float:
     return dt.timestamp()
 
 
-def _market_keyword_exclusion_blob(market: dict) -> str:
-    """Lowercased text from the same fields as keyword checks in Gamma payloads.
-
-    Used for `StandaloneMarket` so runtime exclusion matches discovery (`is_market_text_excluded`).
-    """
-    parts: list[str] = []
+def _tag_rows_from_market_payload(market: dict) -> list[dict]:
+    """Normalize Gamma ``tags`` on a market dict to a list of tag objects."""
     tags = market.get("tags") or []
     if isinstance(tags, str):
         try:
             tags = json.loads(tags)
         except (json.JSONDecodeError, TypeError):
             tags = [tags]
+    if not isinstance(tags, list):
+        return []
+    out: list[dict] = []
     for tag in tags:
-        label = (
-            (tag.get("label") or tag.get("name") or "").lower()
-            if isinstance(tag, dict)
-            else str(tag).lower()
-        )
+        if isinstance(tag, dict):
+            out.append(tag)
+    return out
+
+
+def _tag_keyword_blob_from_rows(rows: list[dict]) -> str:
+    """Lowercased newline-joined tag labels and slugs for substring matching."""
+    parts: list[str] = []
+    for tag in rows:
+        if not isinstance(tag, dict):
+            continue
+        tid = str(tag.get("id") or "").strip().lower()
+        if tid:
+            parts.append(tid)
+        label = str(tag.get("label") or "").strip().lower()
         if label:
             parts.append(label)
-
-    for field in (
-        "slug",
-        "groupItemTitle",
-        "category",
-        "question",
-        "description",
-        "title",
-    ):
-        value = str(market.get(field) or "").lower()
-        if value:
-            parts.append(value)
-
-    events = market.get("events") or []
-    if isinstance(events, list):
-        for event in events:
-            if not isinstance(event, dict):
-                continue
-            for fld in ("title", "slug", "subtitle", "description", "name"):
-                value = str(event.get(fld) or "").lower()
-                if value:
-                    parts.append(value)
+        slug = str(tag.get("slug") or "").strip().lower()
+        if slug:
+            parts.append(slug)
     return "\n".join(parts)
 
 
-def _is_excluded_category(market: dict, excluded_keywords: frozenset[str]) -> bool:
-    if not excluded_keywords:
+def _market_tag_keyword_blob(market: dict) -> str:
+    """Tag-only blob from embedded payload (no category/slug/question)."""
+    return _tag_keyword_blob_from_rows(_tag_rows_from_market_payload(market))
+
+
+async def fetch_market_tags_by_id(
+    session: aiohttp.ClientSession,
+    market_id: int,
+    *,
+    timeout: float = TAG_FETCH_TIMEOUT_SEC,
+) -> list[dict]:
+    """GET /markets/{id}/tags — https://docs.polymarket.com/api-reference/markets/get-market-tags-by-id"""
+    url = f"{GAMMA_API}/markets/{int(market_id)}/tags"
+    retries = 0
+    while retries < PAGE_MAX_RETRIES:
+        try:
+            async with session.get(
+                url,
+                headers={"User-Agent": "polymarket-scanner/1.0"},
+                timeout=timeout,
+            ) as resp:
+                if resp.status == 404:
+                    return []
+                resp.raise_for_status()
+                batch = await resp.json()
+                if not isinstance(batch, list):
+                    return []
+                return [t for t in batch if isinstance(t, dict)]
+        except aiohttp.ClientResponseError as exc:
+            if exc.status in (429, 500, 502, 503, 504) and retries < PAGE_MAX_RETRIES:
+                retry_after = _parse_retry_after_seconds(exc.headers)
+                delay = retry_after if retry_after is not None else min(
+                    PAGE_RETRY_BASE_DELAY_SEC * (2**retries),
+                    PAGE_RETRY_MAX_DELAY_SEC,
+                )
+                delay = max(delay, TAG_FETCH_MIN_RETRY_DELAY_SEC)
+                retries += 1
+                logger.warning(
+                    "gamma_market_tags_rate_limited_or_error id=%s status=%s retry=%d delay=%.2f",
+                    market_id,
+                    exc.status,
+                    retries,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+            logger.warning(
+                "gamma_market_tags_fetch_failed id=%s status=%s err=%s",
+                market_id,
+                exc.status,
+                exc,
+            )
+            return []
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            logger.warning("gamma_market_tags_fetch_failed id=%s err=%s", market_id, exc)
+            retries += 1
+            if retries >= PAGE_MAX_RETRIES:
+                return []
+            await asyncio.sleep(min(PAGE_RETRY_BASE_DELAY_SEC * (2 ** (retries - 1)), PAGE_RETRY_MAX_DELAY_SEC))
+            continue
+        except Exception as exc:
+            logger.warning("gamma_market_tags_fetch_failed id=%s err=%s", market_id, exc)
+            return []
+    return []
+
+
+def _merge_tag_rows_for_exclusion(embedded: list[dict], api: list[dict]) -> list[dict]:
+    """Gamma /markets pages often embed a subset of tags; /markets/{id}/tags is complete. Dedupe by id or label+slug."""
+    by_key: dict[str, dict] = {}
+    for row in embedded + api:
+        if not isinstance(row, dict):
+            continue
+        tid = str(row.get("id") or "").strip()
+        if tid:
+            key = f"id:{tid}"
+        else:
+            label = str(row.get("label") or "").strip().lower()
+            slug = str(row.get("slug") or "").strip().lower()
+            key = f"ls:{label}|{slug}" if (label or slug) else f"row:{len(by_key)}"
+        by_key[key] = row
+    return list(by_key.values())
+
+
+async def _resolve_market_tag_keyword_blob(
+    session: aiohttp.ClientSession,
+    market: dict,
+    *,
+    tag_fetch_semaphore: asyncio.Semaphore,
+) -> str:
+    """Merge embedded tags with GET /markets/{id}/tags when id is known.
+
+    List/search Gamma payloads often include only a partial ``tags`` array; skipping the
+    tags endpoint caused ``excluded_keywords`` such as ``ukraine`` to miss markets that
+    only show that label on the dedicated tags route.
+    """
+    embedded_rows = _tag_rows_from_market_payload(market)
+    api_rows: list[dict] = []
+    mid = market.get("id")
+    if mid is not None:
+        try:
+            mid_int = int(mid)
+        except (TypeError, ValueError):
+            logger.warning("gamma_market_tags_skip_invalid_id id=%r slug=%s", mid, market.get("slug"))
+        else:
+            async with tag_fetch_semaphore:
+                api_rows = await fetch_market_tags_by_id(session, mid_int)
+    merged = _merge_tag_rows_for_exclusion(embedded_rows, api_rows)
+    return _tag_keyword_blob_from_rows(merged)
+
+
+def _tag_blob_matches_excluded_keywords(tag_blob: str, excluded_keywords: frozenset[str]) -> bool:
+    if not excluded_keywords or not tag_blob:
         return False
-    blob = _market_keyword_exclusion_blob(market)
     for keyword in excluded_keywords:
-        if keyword in blob:
+        if keyword in tag_blob:
             return True
     return False
 
@@ -170,13 +277,23 @@ def is_market_text_excluded(
     *,
     excluded_keywords: frozenset[str],
     excluded_title_phrases: frozenset[str],
+    tag_keyword_blob_override: str | None = None,
 ) -> bool:
-    """True when market text matches excluded_keywords or excluded_title_phrases."""
+    """True when title phrases match, or when ``excluded_keywords`` match Gamma tag labels/slugs.
+
+    Keywords use only tag data (embedded ``tags`` or ``tag_keyword_blob_override`` from
+    GET /markets/{id}/tags), not category or question text.
+    """
     if _has_excluded_title_phrase(market, excluded_title_phrases):
         return True
-    if _is_excluded_category(market, excluded_keywords):
-        return True
-    return False
+    if not excluded_keywords:
+        return False
+    blob = (
+        tag_keyword_blob_override
+        if tag_keyword_blob_override is not None
+        else _market_tag_keyword_blob(market)
+    )
+    return _tag_blob_matches_excluded_keywords(blob, excluded_keywords)
 
 
 def standalone_market_matches_text_exclusions(
@@ -256,6 +373,35 @@ def _passes_candidate_filters(
     return True
 
 
+async def _passes_candidate_filters_async(
+    session: aiohttp.ClientSession,
+    market: dict,
+    *,
+    max_end_date_months: int,
+    excluded_keywords: frozenset[str],
+    excluded_title_phrases: frozenset[str],
+    tag_fetch_semaphore: asyncio.Semaphore,
+) -> tuple[bool, str]:
+    """Structural + exclusions; resolves tag blob via /markets/{{id}}/tags when keywords are configured."""
+    if not _is_binary_yes_no(market):
+        return False, ""
+    if _is_sports_market(market):
+        return False, ""
+    if _has_excluded_title_phrase(market, excluded_title_phrases):
+        return False, ""
+    if not _ends_within_window(market, max_end_date_months=max_end_date_months):
+        return False, ""
+
+    tag_blob = ""
+    if excluded_keywords:
+        tag_blob = await _resolve_market_tag_keyword_blob(
+            session, market, tag_fetch_semaphore=tag_fetch_semaphore
+        )
+        if _tag_blob_matches_excluded_keywords(tag_blob, excluded_keywords):
+            return False, tag_blob
+    return True, tag_blob
+
+
 def _parse_probability_pair(value) -> tuple[float, float]:
     prices = _load_json_list(value)
     if len(prices) < 2:
@@ -310,7 +456,11 @@ def build_standalone_market(market: dict) -> StandaloneMarket | None:
         end_ts=_parse_iso_ts(end_date),
         category=str(market.get("groupItemTitle") or market.get("category") or ""),
         event_slug=_get_event_slug(market),
-        keyword_exclusion_blob=_market_keyword_exclusion_blob(market),
+        keyword_exclusion_blob=(
+            str(resolved)
+            if (resolved := market.get(_RESOLVED_TAG_BLOB_KEY)) is not None
+            else _market_tag_keyword_blob(market)
+        ),
         created_at_ts=_parse_iso_ts(created_raw),
         end_date_ts=_parse_iso_ts(end_date),
     )
@@ -336,15 +486,23 @@ def _parse_retry_after_seconds(headers) -> float | None:
     if raw is None:
         return None
     try:
-        return max(0.0, float(raw))
+        val = float(raw)
     except (TypeError, ValueError):
         return None
+    if val <= 0:
+        return None
+    return val
 
 
-async def _iter_open_market_batches(session: aiohttp.ClientSession):
+async def _iter_open_market_batches(
+    session: aiohttp.ClientSession,
+    *,
+    max_pages: int | None = None,
+):
     offset = 0
     pages_in_burst = 0
     retries = 0
+    pages_fetched = 0
     while True:
         params = {
             "active": "true",
@@ -406,10 +564,12 @@ async def _iter_open_market_batches(session: aiohttp.ClientSession):
 
         yield batch
 
+        pages_fetched += 1
+        if max_pages is not None and pages_fetched >= max_pages:
+            return
+
         offset += len(batch)
         pages_in_burst += 1
-        if len(batch) < PAGE_LIMIT:
-            return
         await asyncio.sleep(PAGE_DELAY_SEC)
         if pages_in_burst >= PAGE_BURST_SIZE:
             await asyncio.sleep(PAGE_BURST_PAUSE_SEC)
@@ -481,25 +641,32 @@ async def fetch_candidate_markets(
     max_end_date_months: int = DEFAULT_MAX_END_DATE_MONTHS,
     excluded_keywords: frozenset[str] = frozenset(),
     excluded_title_phrases: frozenset[str] = frozenset(),
+    max_gamma_pages: int | None = None,
 ) -> list[StandaloneMarket]:
     markets: list[StandaloneMarket] = []
     standalone_candidates: dict[str, StandaloneMarket] = {}
     standalone_no_event: list[StandaloneMarket] = []
     event_counts: Counter = Counter()
     pages_processed = 0
-    async for batch in _iter_open_market_batches(session):
+    tag_sem = asyncio.Semaphore(TAG_FETCH_CONCURRENCY)
+    async for batch in _iter_open_market_batches(session, max_pages=max_gamma_pages):
         for raw_market in batch:
             event_slug = _get_event_slug(raw_market)
             if event_slug:
                 event_counts[event_slug] += 1
 
-            if not _passes_candidate_filters(
+            ok, tag_blob = await _passes_candidate_filters_async(
+                session,
                 raw_market,
                 max_end_date_months=max_end_date_months,
                 excluded_keywords=excluded_keywords,
                 excluded_title_phrases=excluded_title_phrases,
-            ):
+                tag_fetch_semaphore=tag_sem,
+            )
+            if not ok:
                 continue
+            if excluded_keywords:
+                raw_market[_RESOLVED_TAG_BLOB_KEY] = tag_blob
             if raw_market.get("negRisk"):
                 continue
 
@@ -550,6 +717,7 @@ async def fetch_markets_by_token_ids(
     markets: list[StandaloneMarket] = []
     excluded_no: set[str] = set()
     seen_no_tokens: set[str] = set()
+    tag_sem = asyncio.Semaphore(TAG_FETCH_CONCURRENCY)
 
     # Gamma expects ``clob_token_ids`` (snake_case). The camelCase param is ignored and
     # returns an arbitrary market, which breaks open-order recovery and exclusions.
@@ -613,6 +781,13 @@ async def fetch_markets_by_token_ids(
         if raw_match is None:
             continue
 
+        tag_blob_override: str | None = None
+        if excluded_keywords:
+            tag_blob_override = await _resolve_market_tag_keyword_blob(
+                session, raw_match, tag_fetch_semaphore=tag_sem
+            )
+            raw_match[_RESOLVED_TAG_BLOB_KEY] = tag_blob_override
+
         _, no_tid = _parse_token_pair(raw_match)
         if (
             excluded_keywords or excluded_title_phrases
@@ -620,6 +795,7 @@ async def fetch_markets_by_token_ids(
             raw_match,
             excluded_keywords=excluded_keywords,
             excluded_title_phrases=excluded_title_phrases,
+            tag_keyword_blob_override=tag_blob_override,
         ):
             # Use the requested token so callers can cancel via ``missing_tokens[token_id]``.
             excluded_no.add(str(token_id).strip())

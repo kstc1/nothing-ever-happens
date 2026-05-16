@@ -1,5 +1,6 @@
 {
   "connection": {
+    "_docs_deposit_wallet": "New API POLY deposit wallets: signature_type 3 and FUNDER_ADDRESS = deposit wallet. See scripts/check_balance.py --sync-update and https://docs.polymarket.com/trading/deposit-wallets",
     "host": "https://clob.polymarket.com",
     "chain_id": 137,
     "signature_type": 2

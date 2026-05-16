@@ -260,6 +260,70 @@ async def _fetch_open_positions(
         offset += len(page)
 
 
+def market_passes_strategy_lifecycle(market: StandaloneMarket, cfg: NothingHappensConfig) -> bool:
+    """Return True if market age and time-to-resolution satisfy lifecycle config."""
+    now = time.time()
+
+    if market.created_at_ts > 0.0:
+        age_sec = now - market.created_at_ts
+        if age_sec < cfg.min_market_age_sec:
+            logger.debug(
+                "lifecycle_gate_skip_too_new slug=%s age_sec=%.0f min=%.0f",
+                market.slug,
+                age_sec,
+                cfg.min_market_age_sec,
+            )
+            return False
+        if not math.isinf(cfg.max_market_age_sec) and age_sec > cfg.max_market_age_sec:
+            logger.debug(
+                "lifecycle_gate_skip_too_old slug=%s age_sec=%.0f max=%.0f",
+                market.slug,
+                age_sec,
+                cfg.max_market_age_sec,
+            )
+            return False
+
+    if market.end_date_ts > 0.0:
+        remaining_sec = market.end_date_ts - now
+        if remaining_sec < cfg.min_time_remaining_sec:
+            logger.debug(
+                "lifecycle_gate_skip_expiring slug=%s remaining_sec=%.0f min=%.0f",
+                market.slug,
+                remaining_sec,
+                cfg.min_time_remaining_sec,
+            )
+            return False
+
+    if market.created_at_ts > 0.0 and market.end_date_ts > 0.0:
+        lifespan_sec = market.end_date_ts - market.created_at_ts
+        if lifespan_sec > 0:
+            age_sec = now - market.created_at_ts
+            age_pct = age_sec / lifespan_sec
+            if age_pct < cfg.min_market_age_pct:
+                logger.debug(
+                    "lifecycle_gate_skip_too_new_pct slug=%s age_pct=%.3f min_pct=%.3f",
+                    market.slug,
+                    age_pct,
+                    cfg.min_market_age_pct,
+                )
+                return False
+            if age_pct > cfg.max_market_age_pct:
+                logger.debug(
+                    "lifecycle_gate_skip_too_old_pct slug=%s age_pct=%.3f max_pct=%.3f",
+                    market.slug,
+                    age_pct,
+                    cfg.max_market_age_pct,
+                )
+                return False
+
+    if market.created_at_ts == 0.0:
+        logger.debug("lifecycle_gate_no_created_at slug=%s — age check skipped", market.slug)
+    if market.end_date_ts == 0.0:
+        logger.debug("lifecycle_gate_no_end_date slug=%s — remaining-time check skipped", market.slug)
+
+    return True
+
+
 class NothingHappensRuntime:
     def __init__(
         self,
@@ -421,66 +485,7 @@ class NothingHappensRuntime:
 
     def _market_in_entry_window(self, market: StandaloneMarket) -> bool:
         """Return True if market age and time-to-resolution satisfy lifecycle config."""
-        now = time.time()
-
-        if market.created_at_ts > 0.0:
-            age_sec = now - market.created_at_ts
-            if age_sec < self.cfg.min_market_age_sec:
-                logger.debug(
-                    "lifecycle_gate_skip_too_new slug=%s age_sec=%.0f min=%.0f",
-                    market.slug,
-                    age_sec,
-                    self.cfg.min_market_age_sec,
-                )
-                return False
-            if not math.isinf(self.cfg.max_market_age_sec) and age_sec > self.cfg.max_market_age_sec:
-                logger.debug(
-                    "lifecycle_gate_skip_too_old slug=%s age_sec=%.0f max=%.0f",
-                    market.slug,
-                    age_sec,
-                    self.cfg.max_market_age_sec,
-                )
-                return False
-
-        if market.end_date_ts > 0.0:
-            remaining_sec = market.end_date_ts - now
-            if remaining_sec < self.cfg.min_time_remaining_sec:
-                logger.debug(
-                    "lifecycle_gate_skip_expiring slug=%s remaining_sec=%.0f min=%.0f",
-                    market.slug,
-                    remaining_sec,
-                    self.cfg.min_time_remaining_sec,
-                )
-                return False
-
-        if market.created_at_ts > 0.0 and market.end_date_ts > 0.0:
-            lifespan_sec = market.end_date_ts - market.created_at_ts
-            if lifespan_sec > 0:
-                age_sec = now - market.created_at_ts
-                age_pct = age_sec / lifespan_sec
-                if age_pct < self.cfg.min_market_age_pct:
-                    logger.debug(
-                        "lifecycle_gate_skip_too_new_pct slug=%s age_pct=%.3f min_pct=%.3f",
-                        market.slug,
-                        age_pct,
-                        self.cfg.min_market_age_pct,
-                    )
-                    return False
-                if age_pct > self.cfg.max_market_age_pct:
-                    logger.debug(
-                        "lifecycle_gate_skip_too_old_pct slug=%s age_pct=%.3f max_pct=%.3f",
-                        market.slug,
-                        age_pct,
-                        self.cfg.max_market_age_pct,
-                    )
-                    return False
-
-        if market.created_at_ts == 0.0:
-            logger.debug("lifecycle_gate_no_created_at slug=%s — age check skipped", market.slug)
-        if market.end_date_ts == 0.0:
-            logger.debug("lifecycle_gate_no_end_date slug=%s — remaining-time check skipped", market.slug)
-
-        return True
+        return market_passes_strategy_lifecycle(market, self.cfg)
 
     async def _market_refresh_loop(self) -> None:
         while not self.shutdown_event.is_set():

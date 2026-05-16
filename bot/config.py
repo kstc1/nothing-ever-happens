@@ -184,6 +184,7 @@ class NothingHappensConfig:
     limit_order_max_age_sec: float = float("inf")
     max_positions_per_category: int = -1
     strict_portfolio_pct_cap: bool = False
+    # Substrings matched only against Gamma tag label/slug (embedded ``tags`` or GET /markets/{id}/tags).
     excluded_keywords: frozenset[str] = frozenset()
     excluded_title_phrases: frozenset[str] = frozenset()
 

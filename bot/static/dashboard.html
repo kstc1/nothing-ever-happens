@@ -17,6 +17,8 @@
   --green: #52d19c;
   --red: #ff7a7a;
   --shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
+}
+
 * { box-sizing: border-box; }
 
 body {
@@ -150,6 +152,59 @@ body::before {
 
 .control-panel {
   margin-bottom: 18px;
+}
+
+.perf-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.perf-stat {
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 14px;
+}
+
+.perf-stat .label {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
+
+.perf-stat .value {
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-family: ui-monospace, monospace;
+}
+
+.equity-chart-wrap {
+  margin-top: 4px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: rgba(10, 9, 8, 0.35);
+  overflow: hidden;
+}
+
+.equity-chart-wrap svg {
+  display: block;
+  width: 100%;
+  height: 200px;
+}
+
+.equity-chart-axis {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 12px 10px;
+  font-size: 0.76rem;
+  color: var(--muted);
+  font-family: ui-monospace, monospace;
+  border-top: 1px solid var(--border);
+  background: var(--surface-strong);
 }
 
 .control-row {
@@ -395,6 +450,10 @@ th[data-sort].sort-desc::after {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .perf-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .control-row {
     flex-direction: column;
     align-items: stretch;
@@ -456,6 +515,57 @@ th[data-sort].sort-desc::after {
     </div>
   </div>
 
+  <section class="panel performance-panel">
+    <div class="panel-head">
+      <h2 class="panel-title">Performance</h2>
+      <div class="panel-note" id="performance-note">cash + marked positions · hourly · CSV restore · baseline reset: WebSocket {"type":"reset_performance_baseline"} or PERFORMANCE_BASELINE_RESET=1 or empty file reset_performance_baseline before restart</div>
+    </div>
+    <div class="perf-grid">
+      <div class="perf-stat">
+        <div class="label">Total return</div>
+        <div class="value mono" id="perf-return">--</div>
+        <div class="trade-meta" id="perf-start-eq">from --</div>
+      </div>
+      <div class="perf-stat">
+        <div class="label">APY (compounded)</div>
+        <div class="value mono" id="perf-apy">--</div>
+        <div class="trade-meta" id="perf-apy-meta">needs ≥1h history</div>
+      </div>
+      <div class="perf-stat">
+        <div class="label">Sharpe (annualized)</div>
+        <div class="value mono" id="perf-sharpe">--</div>
+        <div class="trade-meta" id="perf-sharpe-meta">risk-free = 0</div>
+      </div>
+      <div class="perf-stat">
+        <div class="label">Sortino (annualized)</div>
+        <div class="value mono" id="perf-sortino">--</div>
+        <div class="trade-meta" id="perf-sortino-meta">downside vs MAR = 0</div>
+      </div>
+      <div class="perf-stat">
+        <div class="label">Equity now</div>
+        <div class="value mono" id="perf-equity-now">--</div>
+        <div class="trade-meta" id="perf-samples">samples: 0</div>
+      </div>
+    </div>
+    <div class="equity-chart-wrap">
+      <svg id="equity-svg" viewBox="0 0 800 200" preserveAspectRatio="none" role="img" aria-label="Equity curve">
+        <defs>
+          <linearGradient id="eq-fill" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stop-color="rgba(231, 157, 84, 0.35)"/>
+            <stop offset="100%" stop-color="rgba(231, 157, 84, 0)"/>
+          </linearGradient>
+        </defs>
+        <polygon id="equity-fill" fill="url(#eq-fill)" points=""/>
+        <polyline id="equity-line" fill="none" stroke="#e79d54" stroke-width="2" points=""/>
+      </svg>
+      <div class="equity-chart-axis">
+        <span id="eq-axis-min">--</span>
+        <span id="eq-axis-span">equity curve</span>
+        <span id="eq-axis-max">--</span>
+      </div>
+    </div>
+  </section>
+
   <section class="panel control-panel">
     <div class="panel-head">
       <h2 class="panel-title">Position Cap</h2>
@@ -514,6 +624,12 @@ const tradeItems = [];
 let latestPortfolio = null;
 let sortColumn = "eta_seconds";
 let sortDirection = "asc";
+let equitySeries = [];
+
+function fmtFixed(value, digits) {
+  if (value == null || Number.isNaN(Number(value))) return "--";
+  return Number(value).toFixed(digits);
+}
 
 function fmtUsd(value, digits = 2) {
   if (value == null || Number.isNaN(Number(value))) return "--";
@@ -552,8 +668,8 @@ function fmtEta(seconds) {
 }
 
 function fmtAgo(tsSec) {
-  if (!tsSec) return "--";
-  const delta = Math.max(0, Math.floor(Date.now() / 1000 - tsSec));
+  if (tsSec == null || !Number.isFinite(Number(tsSec)) || Number(tsSec) <= 0) return "--";
+  const delta = Math.max(0, Math.floor(Date.now() / 1000 - Number(tsSec)));
   if (delta < 60) return delta + "s ago";
   if (delta < 3600) return Math.floor(delta / 60) + "m ago";
   return Math.floor(delta / 3600) + "h ago";
@@ -761,6 +877,155 @@ function renderSessionPnl(msg) {
   balEl.textContent = "balance " + fmtUsd(msg.current_balance);
 }
 
+function fmtDurationSec(sec) {
+  if (sec == null || !Number.isFinite(Number(sec))) return "--";
+  const s = Math.max(0, Math.floor(Number(sec)));
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+  return Math.floor(s / 86400) + "d " + Math.floor((s % 86400) / 3600) + "h";
+}
+
+function mergeEquitySeriesFromPoints(points) {
+  equitySeries = (points || [])
+    .map(p => ({ ts: Number(p.ts), equity: Number(p.equity) }))
+    .filter(p => Number.isFinite(p.ts) && Number.isFinite(p.equity))
+    .sort((a, b) => a.ts - b.ts);
+  redrawEquityChart();
+}
+
+function pushEquityPoint(ts, equity) {
+  const t = Number(ts);
+  const e = Number(equity);
+  if (!Number.isFinite(t) || !Number.isFinite(e)) return;
+  if (!equitySeries.length || t >= equitySeries[equitySeries.length - 1].ts) {
+    if (equitySeries.length && equitySeries[equitySeries.length - 1].ts === t) {
+      equitySeries[equitySeries.length - 1] = { ts: t, equity: e };
+    } else {
+      equitySeries.push({ ts: t, equity: e });
+    }
+  } else {
+    mergeEquitySeriesFromPoints(equitySeries.concat([{ ts: t, equity: e }]));
+    return;
+  }
+  if (equitySeries.length > 5000) {
+    equitySeries = equitySeries.slice(-4000);
+  }
+  redrawEquityChart();
+}
+
+function redrawEquityChart() {
+  const line = document.getElementById("equity-line");
+  const fill = document.getElementById("equity-fill");
+  const minEl = document.getElementById("eq-axis-min");
+  const maxEl = document.getElementById("eq-axis-max");
+  const spanEl = document.getElementById("eq-axis-span");
+  const w = 800;
+  const h = 200;
+  const pad = 14;
+  if (!line || !fill) return;
+  if (equitySeries.length < 2) {
+    line.setAttribute("points", "");
+    fill.setAttribute("points", "");
+    minEl.textContent = "--";
+    maxEl.textContent = "--";
+    spanEl.textContent = equitySeries.length === 1 ? "one sample · waiting for curve" : "waiting for samples";
+    return;
+  }
+  let minE = Infinity;
+  let maxE = -Infinity;
+  for (const p of equitySeries) {
+    minE = Math.min(minE, p.equity);
+    maxE = Math.max(maxE, p.equity);
+  }
+  if (minE === maxE) {
+    minE -= 1;
+    maxE += 1;
+  }
+  const t0 = equitySeries[0].ts;
+  const t1 = equitySeries[equitySeries.length - 1].ts;
+  const dx = Math.max(t1 - t0, 1);
+  const buildXY = (p) => {
+    const x = pad + ((p.ts - t0) / dx) * (w - 2 * pad);
+    const y = h - pad - ((p.equity - minE) / (maxE - minE)) * (h - 2 * pad);
+    return { x, y };
+  };
+  const pts = [];
+  let lineStr = "";
+  for (let i = 0; i < equitySeries.length; i++) {
+    const { x, y } = buildXY(equitySeries[i]);
+    pts.push({ x, y });
+    lineStr += (i ? " " : "") + x + "," + y;
+  }
+  line.setAttribute("points", lineStr);
+  const baseY = h - pad;
+  let poly = pts[0].x + "," + baseY;
+  for (const q of pts) {
+    poly += " " + q.x + "," + q.y;
+  }
+  poly += " " + pts[pts.length - 1].x + "," + baseY;
+  fill.setAttribute("points", poly);
+  minEl.textContent = fmtUsd(minE);
+  maxEl.textContent = fmtUsd(maxE);
+  const spanSec = Math.max(0, (t1 - t0) / 1000);
+  spanEl.textContent = "span " + fmtDurationSec(spanSec);
+}
+
+function renderPerformance(msg) {
+  const ret = Number(msg.total_return_pct);
+  const retEl = document.getElementById("perf-return");
+  const sign = ret >= 0 ? "+" : "";
+  retEl.textContent = sign + fmtFixed(ret, 2) + "%";
+  retEl.className = "value mono " + (ret >= 0 ? "positive" : "negative");
+  document.getElementById("perf-start-eq").textContent =
+    "from " + fmtUsd(msg.starting_equity_usd);
+
+  const apyEl = document.getElementById("perf-apy");
+  const apyMeta = document.getElementById("perf-apy-meta");
+  if (msg.apy_pct == null) {
+    apyEl.textContent = "--";
+    apyEl.className = "value mono";
+    apyMeta.textContent = "compounded · needs ≥1h span";
+  } else {
+    const apy = Number(msg.apy_pct);
+    const apySign = apy >= 0 ? "+" : "";
+    apyEl.textContent = apySign + fmtFixed(apy, 2) + "%";
+    apyEl.className = "value mono " + (apy >= 0 ? "positive" : "negative");
+    apyMeta.textContent = "compounded annual (rf=0)";
+  }
+
+  const shEl = document.getElementById("perf-sharpe");
+  const shMeta = document.getElementById("perf-sharpe-meta");
+  if (msg.sharpe_ratio == null) {
+    shEl.textContent = "--";
+    shEl.className = "value mono";
+    shMeta.textContent = "needs ≥3 equity samples";
+  } else {
+    const sh = Number(msg.sharpe_ratio);
+    shEl.textContent = fmtFixed(sh, 2);
+    shEl.className = "value mono";
+    shMeta.textContent = "annualized · per-period vol";
+  }
+
+  const soEl = document.getElementById("perf-sortino");
+  const soMeta = document.getElementById("perf-sortino-meta");
+  if (msg.sortino_ratio == null) {
+    soEl.textContent = "--";
+    soEl.className = "value mono";
+    soMeta.textContent = "needs ≥3 equity samples";
+  } else {
+    const so = Number(msg.sortino_ratio);
+    soEl.textContent = fmtFixed(so, 2);
+    soEl.className = "value mono";
+    soMeta.textContent = "annualized · downside deviation";
+  }
+
+  document.getElementById("perf-equity-now").textContent = fmtUsd(msg.equity_usd);
+  document.getElementById("perf-samples").textContent =
+    "samples: " + String(msg.sample_count || 0) +
+    " · window " + fmtDurationSec(msg.elapsed_seconds);
+}
+
 function handleMessage(msg) {
   switch (msg.type) {
     case "portfolio":
@@ -771,6 +1036,15 @@ function handleMessage(msg) {
       break;
     case "session_pnl":
       renderSessionPnl(msg);
+      break;
+    case "performance":
+      renderPerformance(msg);
+      break;
+    case "equity_history":
+      mergeEquitySeriesFromPoints(msg.points);
+      break;
+    case "equity_point":
+      pushEquityPoint(msg.ts, msg.equity);
       break;
     case "control_ack":
       if (!msg.ok) {
