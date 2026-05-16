@@ -7,6 +7,7 @@ import ctypes
 import gc
 import json
 import logging
+import os
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,18 @@ GC_COLLECT_INTERVAL_PAGES = 20
 TAG_FETCH_CONCURRENCY = 3
 TAG_FETCH_TIMEOUT_SEC = 15.0
 TAG_FETCH_MIN_RETRY_DELAY_SEC = 1.0
+
+
+def _effective_tag_fetch_concurrency() -> int:
+    raw = os.getenv("PM_GAMMA_TAG_FETCH_CONCURRENCY", "").strip()
+    if not raw:
+        return max(1, TAG_FETCH_CONCURRENCY)
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("gamma_tag_fetch_concurrency_invalid_env using_default=%s", TAG_FETCH_CONCURRENCY)
+        return max(1, TAG_FETCH_CONCURRENCY)
+
 
 # Cached on raw market dict during async discovery / token recovery (see Gamma /markets/{id}/tags).
 _RESOLVED_TAG_BLOB_KEY = "_resolved_tag_keyword_blob"
@@ -520,6 +533,14 @@ async def _iter_open_market_batches(
                 resp.raise_for_status()
                 batch = await resp.json()
         except aiohttp.ClientResponseError as exc:
+            if exc.status == 422:
+                # Gamma often returns 422 once offset exceeds the listable catalog (e.g. offset=10100).
+                # Treat as end-of-pagination instead of failing the entire refresh.
+                logger.warning(
+                    "gamma_markets_fetch_offset_closed offset=%d status=422",
+                    offset,
+                )
+                return
             if exc.status in (429, 500, 502, 503, 504) and retries < PAGE_MAX_RETRIES:
                 retry_after = _parse_retry_after_seconds(exc.headers)
                 delay = retry_after if retry_after is not None else min(
@@ -648,7 +669,7 @@ async def fetch_candidate_markets(
     standalone_no_event: list[StandaloneMarket] = []
     event_counts: Counter = Counter()
     pages_processed = 0
-    tag_sem = asyncio.Semaphore(TAG_FETCH_CONCURRENCY)
+    tag_sem = asyncio.Semaphore(_effective_tag_fetch_concurrency())
     async for batch in _iter_open_market_batches(session, max_pages=max_gamma_pages):
         for raw_market in batch:
             event_slug = _get_event_slug(raw_market)
@@ -717,7 +738,7 @@ async def fetch_markets_by_token_ids(
     markets: list[StandaloneMarket] = []
     excluded_no: set[str] = set()
     seen_no_tokens: set[str] = set()
-    tag_sem = asyncio.Semaphore(TAG_FETCH_CONCURRENCY)
+    tag_sem = asyncio.Semaphore(_effective_tag_fetch_concurrency())
 
     # Gamma expects ``clob_token_ids`` (snake_case). The camelCase param is ignored and
     # returns an arbitrary market, which breaks open-order recovery and exclusions.
