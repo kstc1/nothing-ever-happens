@@ -88,6 +88,64 @@ def _resolve_live_wallet_address(exchange_cfg) -> str | None:
         raise ValueError("Could not derive live wallet address from PRIVATE_KEY") from exc
 
 
+def _relayer_api_key() -> str | None:
+    return os.getenv("RELAYER_API_KEY") or os.getenv("POLYMARKET_RELAYER_API_KEY")
+
+
+def _relayer_api_key_address() -> str | None:
+    return os.getenv("RELAYER_API_KEY_ADDRESS") or os.getenv("POLYMARKET_RELAYER_API_KEY_ADDRESS")
+
+
+def _build_live_redeemer(exchange_cfg, strategy_cfg):
+    """Start the auto-redeemer for live Safe (2) or deposit-wallet (3) runtimes."""
+    if not (
+        exchange_cfg.live_send_enabled
+        and strategy_cfg.auto_redeem_enabled
+        and exchange_cfg.private_key
+        and exchange_cfg.funder_address
+        and exchange_cfg.signature_type in {2, 3}
+    ):
+        return None
+
+    from bot.redeemer import Redeemer
+
+    rpc_url = (exchange_cfg.polygon_rpc_url or "").strip()
+    relayer_key = _relayer_api_key()
+    relayer_addr = _relayer_api_key_address()
+    if exchange_cfg.signature_type == 2:
+        if not rpc_url:
+            return None
+        return Redeemer(
+            private_key=exchange_cfg.private_key.get_secret_value(),
+            proxy_address=exchange_cfg.funder_address,
+            chain_id=exchange_cfg.chain_id,
+            rpc_url=rpc_url,
+            session=None,
+            check_interval_sec=strategy_cfg.redeemer_interval_sec,
+            signature_type=2,
+        )
+    if not relayer_key or not relayer_addr:
+        logger.error(
+            "type3_auto_redeem_missing_relayer_credentials signature_type=%s",
+            exchange_cfg.signature_type,
+        )
+        raise ValueError(
+            "RELAYER_API_KEY and RELAYER_API_KEY_ADDRESS are required when "
+            "auto-redeem is enabled for signature_type 3 (deposit wallet)"
+        )
+    return Redeemer(
+        private_key=exchange_cfg.private_key.get_secret_value(),
+        proxy_address=exchange_cfg.funder_address,
+        chain_id=exchange_cfg.chain_id,
+        rpc_url=rpc_url,
+        session=None,
+        check_interval_sec=strategy_cfg.redeemer_interval_sec,
+        signature_type=3,
+        relayer_api_key=relayer_key,
+        relayer_api_key_address=relayer_addr,
+    )
+
+
 def _patch_clob_http_timeout() -> None:
     """Increase py-clob-client's httpx read timeout from 5s to 12s."""
     try:
@@ -154,27 +212,12 @@ async def run():
     if recovery is not None and recovery.enabled:
         recovery.restore_risk_controller(risk, now_value_us=int(time.time() * 1_000_000))
 
-    redeemer = None
-    rpc_url = (exchange_cfg.polygon_rpc_url or "").strip()
-    if (
-        exchange_cfg.live_send_enabled
-        and strategy_cfg.auto_redeem_enabled
-        and exchange_cfg.private_key
-        and exchange_cfg.signature_type == 2
-        and exchange_cfg.funder_address
-        and rpc_url
-    ):
-        from bot.redeemer import Redeemer
-
-        redeemer = Redeemer(
-            private_key=exchange_cfg.private_key.get_secret_value(),
-            proxy_address=exchange_cfg.funder_address,
-            chain_id=exchange_cfg.chain_id,
-            rpc_url=rpc_url,
-            session=None,
-            check_interval_sec=strategy_cfg.redeemer_interval_sec,
+    redeemer = _build_live_redeemer(exchange_cfg, strategy_cfg)
+    if redeemer is not None:
+        logger.info(
+            "redeemer_enabled",
+            extra={"signature_type": exchange_cfg.signature_type},
         )
-        logger.info("redeemer_enabled")
 
     dashboard_port = os.getenv("PORT") or os.getenv("DASHBOARD_PORT")
     dashboard_task = None

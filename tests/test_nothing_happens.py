@@ -374,6 +374,36 @@ async def test_sync_positions_preserves_existing_holdings_on_fetch_failure() -> 
 
 
 @pytest.mark.asyncio
+async def test_sync_positions_sets_total_open_exposure_cap_to_cash_plus_mark_to_market() -> None:
+    exchange = StubExchange(collateral_balance=150.0)
+    runtime = _make_runtime(wallet_address="0xwallet", exchange=exchange)
+    runtime.risk.cfg.max_total_open_exposure_usd = 1_500.0
+    market = _make_market(slug="cap-market")
+    runtime._markets_by_slug[market.slug] = market
+    api_position = {
+        "slug": market.slug,
+        "title": market.question,
+        "outcome": "No",
+        "asset": market.no_token_id,
+        "conditionId": market.condition_id,
+        "size": 20.0,
+        "avgPrice": 0.5,
+        "initialValue": 10.0,
+        "curPrice": 0.55,
+        "currentValue": 11.0,
+        "endDate": market.end_date,
+    }
+
+    with patch(
+        "bot.strategy.nothing_happens._fetch_open_positions",
+        new=AsyncMock(return_value=[api_position]),
+    ):
+        await runtime._sync_positions()
+
+    assert runtime.risk.cfg.max_total_open_exposure_usd == pytest.approx(161.0)
+
+
+@pytest.mark.asyncio
 async def test_run_price_cycle_waits_for_initial_remote_position_sync() -> None:
     runtime = _make_runtime(wallet_address="0xwallet")
     market = _make_market(slug="wait-for-sync")

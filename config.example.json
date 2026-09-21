@@ -3,7 +3,7 @@
     "_docs_deposit_wallet": "New API POLY deposit wallets: signature_type 3 and FUNDER_ADDRESS = deposit wallet. See scripts/check_balance.py --sync-update and https://docs.polymarket.com/trading/deposit-wallets",
     "host": "https://clob.polymarket.com",
     "chain_id": 137,
-    "signature_type": 2
+    "signature_type": 3
   },
   "strategies": {
     "nothing_happens": {
@@ -22,7 +22,7 @@
       "max_backoff_sec": 900,
       "max_new_positions": -1,
       "shutdown_on_max_new_positions": false,
-      "auto_redeem_enabled": false,
+      "auto_redeem_enabled": true,
       "redeemer_interval_sec": 1800,
       "clob_rate_limit_rps": 5.0,
       "clob_rate_limit_burst": 10.0,

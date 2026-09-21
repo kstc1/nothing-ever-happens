@@ -1048,6 +1048,7 @@ class NothingHappensRuntime:
             (0.0 if available_collateral_usd is None else max(0.0, float(available_collateral_usd)))
             + open_positions_mark_to_market
         )
+        self.risk.cfg.max_total_open_exposure_usd = portfolio_value_estimate
         logger.info(
             "nothing_happens_positions_synced",
             extra={
@@ -1057,6 +1058,7 @@ class NothingHappensRuntime:
                 "ambiguous_reserved_usd": ambiguous_reserved_usd,
                 "positions_mark_to_market_usd": open_positions_mark_to_market,
                 "portfolio_sizing_value_usd": portfolio_value_estimate,
+                "max_total_open_exposure_usd": self.risk.cfg.max_total_open_exposure_usd,
             },
         )
         self._publish_portfolio()

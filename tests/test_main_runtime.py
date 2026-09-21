@@ -4,7 +4,12 @@ import pytest
 
 from bot.config import ExchangeConfig, NothingHappensConfig
 from bot.exchange.paper import PaperExchangeClient
-from bot.main import _build_exchange, _resolve_live_wallet_address, _validate_live_runtime
+from bot.main import (
+    _build_exchange,
+    _build_live_redeemer,
+    _resolve_live_wallet_address,
+    _validate_live_runtime,
+)
 from bot.secret_str import SecretStr
 
 
@@ -71,3 +76,42 @@ def test_resolve_live_wallet_address_uses_signer_for_direct_eoa():
         wallet_address = _resolve_live_wallet_address(exchange)
     assert wallet_address == "0xsigner"
     from_key.assert_called_once_with("0xabc")
+
+
+def _live_exchange(**overrides) -> ExchangeConfig:
+    values = dict(
+        host="https://clob.polymarket.com",
+        chain_id=137,
+        signature_type=2,
+        private_key=SecretStr("0xabc"),
+        funder_address="0xfunder",
+        polygon_rpc_url="https://polygon-rpc.com",
+        live_send_enabled=True,
+    )
+    values.update(overrides)
+    return ExchangeConfig(**values)
+
+
+def test_build_live_redeemer_starts_for_safe_v2():
+    redeemer = _build_live_redeemer(_live_exchange(), NothingHappensConfig(auto_redeem_enabled=True))
+    assert redeemer is not None
+    assert redeemer._signature_type == 2
+
+
+def test_build_live_redeemer_starts_for_deposit_wallet_v3(monkeypatch):
+    monkeypatch.setenv("RELAYER_API_KEY", "rk")
+    monkeypatch.setenv("RELAYER_API_KEY_ADDRESS", "0xsigner")
+    exchange = _live_exchange(signature_type=3, polygon_rpc_url=None)
+    redeemer = _build_live_redeemer(exchange, NothingHappensConfig(auto_redeem_enabled=True))
+    assert redeemer is not None
+    assert redeemer._signature_type == 3
+
+
+def test_build_live_redeemer_type3_raises_without_relayer_keys(monkeypatch):
+    monkeypatch.delenv("RELAYER_API_KEY", raising=False)
+    monkeypatch.delenv("RELAYER_API_KEY_ADDRESS", raising=False)
+    monkeypatch.delenv("POLYMARKET_RELAYER_API_KEY", raising=False)
+    monkeypatch.delenv("POLYMARKET_RELAYER_API_KEY_ADDRESS", raising=False)
+    exchange = _live_exchange(signature_type=3, polygon_rpc_url=None)
+    with pytest.raises(ValueError, match="RELAYER_API_KEY"):
+        _build_live_redeemer(exchange, NothingHappensConfig(auto_redeem_enabled=True))

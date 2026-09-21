@@ -90,11 +90,17 @@ class Redeemer:
         rpc_url: str,
         session: aiohttp.ClientSession | None = None,
         check_interval_sec: int = DEFAULT_REDEEM_CHECK_INTERVAL_SEC,
+        signature_type: int = 2,
+        relayer_api_key: str | None = None,
+        relayer_api_key_address: str | None = None,
     ):
         self._private_key = private_key
         self._proxy_address = proxy_address
         self._chain_id = chain_id
         self._rpc_url = rpc_url
+        self._signature_type = int(signature_type)
+        self._relayer_api_key = relayer_api_key
+        self._relayer_api_key_address = relayer_api_key_address
         self._redeemed: set[str] = set()
         self._failed_attempts: dict[str, int] = {}  # conditionId -> consecutive failures
         self._failed_at: dict[str, float] = {}  # conditionId -> timestamp of last failure
@@ -311,18 +317,19 @@ class Redeemer:
 
     def _redeem_all(self, positions: list[dict]) -> None:
         """Redeem all discovered positions on-chain, one at a time with nonce settling."""
-        w3 = Web3(Web3.HTTPProvider(self._rpc_url, request_kwargs={"timeout": 30}))
-        try:
-            w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-        except ValueError:
-            pass
-
-        # Clear any stuck nonces before attempting redeems
-        if not self._clear_stuck_nonces(w3):
-            return  # nonces still stuck — skip redeems this cycle
-
-        ct_address = Web3.to_checksum_address(CT_ADDRESS)
-        ctf = w3.eth.contract(address=ct_address, abi=CTF_REDEEM_ABI)
+        w3 = None
+        ctf = None
+        ct_address = CT_ADDRESS
+        if self._signature_type != 3:
+            w3 = Web3(Web3.HTTPProvider(self._rpc_url, request_kwargs={"timeout": 30}))
+            try:
+                w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+            except ValueError:
+                pass
+            if not self._clear_stuck_nonces(w3):
+                return
+            ct_address = Web3.to_checksum_address(CT_ADDRESS)
+            ctf = w3.eth.contract(address=ct_address, abi=CTF_REDEEM_ABI)
 
         for i, pos in enumerate(positions):
             condition_id = pos["conditionId"]
@@ -345,7 +352,7 @@ class Redeemer:
                         "batch_index": f"{i + 1}/{len(positions)}",
                     },
                 )
-                self._execute_redeem(w3, ctf, ct_address, condition_bytes)
+                self._execute_redeem(w3, ctf, ct_address, condition_bytes, pos)
                 self._redeemed.add(condition_id)
                 self._failed_attempts.pop(condition_id, None)
                 logger.info("redeemer_success: %s", slug)
@@ -395,14 +402,34 @@ class Redeemer:
                 else:
                     time.sleep(RETRY_DELAY_SEC)
 
+    def _execute_deposit_wallet_redeem(self, condition_id: bytes, position: dict) -> None:
+        if not self._relayer_api_key or not self._relayer_api_key_address:
+            logger.error("deposit_wallet_redeem_missing_relayer_credentials")
+            raise RuntimeError("RELAYER_API_KEY and RELAYER_API_KEY_ADDRESS are required for type 3 redeem")
+        from bot.deposit_wallet_redeem import redeem_via_relayer
+
+        cid_hex = "0x" + condition_id.hex()
+        redeem_via_relayer(
+            private_key=self._private_key,
+            deposit_wallet=self._proxy_address,
+            chain_id=self._chain_id,
+            relayer_api_key=self._relayer_api_key,
+            relayer_api_key_address=self._relayer_api_key_address,
+            position=position,
+            condition_id=cid_hex,
+        )
+
     def _execute_redeem(
         self,
         w3: Web3,
         ctf,
         ct_address: str,
         condition_id: bytes,
+        position: dict | None = None,
     ) -> None:
-        """Execute redeemPositions via Gnosis Safe."""
+        if self._signature_type == 3:
+            self._execute_deposit_wallet_redeem(condition_id, position or {})
+            return
         signer = Account.from_key(self._private_key)
         proxy = Web3.to_checksum_address(self._proxy_address)
         safe = w3.eth.contract(address=proxy, abi=SAFE_ABI)
