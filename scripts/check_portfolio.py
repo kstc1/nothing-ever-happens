@@ -10,10 +10,10 @@ import argparse
 import json
 from pathlib import Path
 
-import requests
 from dotenv import load_dotenv
 
 from bot.config import _load_config_file, _load_nothing_happens_config
+from bot.data_api import fetch_wallet_positions_sync, position_current_value
 from bot.exchange.polymarket_clob import PolymarketClobExchangeClient
 
 
@@ -42,15 +42,9 @@ def main() -> None:
     print(f"CLOB-facing wallet (`FUNDER_ADDRESS` when typed): {wallet}")
     print(f"signature_type: {e.signature_type}")
 
-    res = requests.get(
-        f"https://data-api.polymarket.com/positions?user={wallet}&redeemable=false",
-        timeout=30,
-    )
-    positions = res.json() if res.status_code == 200 else []
-    total_val = 0.0
-    for p in positions:
-        if isinstance(p, dict):
-            total_val += float(p.get("currentValue", 0))
+    res_positions = fetch_wallet_positions_sync(wallet, status="OPEN")
+    positions = [p for p in res_positions if not p.get("redeemable")]
+    total_val = sum(position_current_value(p) for p in positions)
 
     print(f"Open Positions Value: {total_val}")
 

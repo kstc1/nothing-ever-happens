@@ -3,6 +3,7 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 
 from bot.redeemer import (
@@ -45,6 +46,17 @@ def _mock_data_api(status=200, json_data=None):
     mock_resp.status = status
     mock_resp.json = AsyncMock(return_value=json_data or [])
 
+    def _raise_for_status() -> None:
+        if status >= 400:
+            raise aiohttp.ClientResponseError(
+                request_info=MagicMock(),
+                history=(),
+                status=status,
+                message="HTTP error",
+            )
+
+    mock_resp.raise_for_status = _raise_for_status
+
     mock_get_ctx = AsyncMock()
     mock_get_ctx.__aenter__.return_value = mock_resp
 
@@ -65,6 +77,7 @@ def _mock_data_api_pages(*, pages):
         mock_resp = AsyncMock()
         mock_resp.status = 200
         mock_resp.json = AsyncMock(return_value=page)
+        mock_resp.raise_for_status = MagicMock()
         mock_get_ctx = AsyncMock()
         mock_get_ctx.__aenter__.return_value = mock_resp
         get_contexts.append(mock_get_ctx)
@@ -113,7 +126,12 @@ async def test_fetch_handles_network_error(redeemer):
 async def test_fetch_paginates_redeemable_positions(redeemer):
     first_page = [dict(SAMPLE_POSITION, conditionId=f"0x{index:064x}") for index in range(100)]
     second_page = [dict(SAMPLE_POSITION, conditionId="0x" + "ff" * 32)]
-    mock_ctx, mock_session = _mock_data_api_pages(pages=[first_page, second_page])
+    mock_ctx, mock_session = _mock_data_api_pages(
+        pages=[
+            {"data": first_page, "pagination": {"next_cursor": "cursor-2"}},
+            {"data": second_page, "pagination": {}},
+        ]
+    )
 
     with patch("bot.redeemer.aiohttp.ClientSession", return_value=mock_ctx):
         result = await redeemer._fetch_redeemable_positions()

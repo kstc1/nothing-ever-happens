@@ -7,6 +7,7 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -16,6 +17,8 @@ import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 DATA_API_BASE = "https://data-api.polymarket.com"
 
@@ -51,20 +54,25 @@ def resolve_default_wallet() -> str | None:
 
 
 def fetch_positions(wallet: str) -> list[dict]:
-    """Fetch all positions (open + redeemable) from Data API."""
-    positions = []
-    for redeemable in ("true", "false"):
-        resp = requests.get(
-            f"{DATA_API_BASE}/positions",
-            params={"user": wallet, "redeemable": redeemable, "sizeThreshold": "0"},
-            timeout=30,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, list):
-                for p in data:
-                    p["_redeemable"] = redeemable == "true"
-                positions.extend(data)
+    """Fetch open and closed positions from Data API v2."""
+    from bot.data_api import fetch_wallet_positions_sync
+
+    positions: list[dict] = []
+    for status in ("OPEN", "CLOSED"):
+        try:
+            page = fetch_wallet_positions_sync(wallet, status=status)
+        except requests.HTTPError as exc:
+            logger.error(
+                "wallet_history_positions_fetch_failed wallet=%s status=%s error=%s",
+                wallet,
+                status,
+                exc,
+            )
+            raise
+        for row in page:
+            item = dict(row)
+            item["_redeemable"] = bool(item.get("redeemable"))
+            positions.append(item)
     return positions
 
 
