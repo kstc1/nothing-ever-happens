@@ -5,6 +5,8 @@ import pytest
 from bot.deposit_wallet_redeem import (
     CTF_COLLATERAL_ADAPTER,
     NEG_RISK_CTF_COLLATERAL_ADAPTER,
+    RELAYER_USER_AGENT,
+    _relayer_headers,
     adapter_address_for_position,
     encode_redeem_positions_calldata,
 )
@@ -17,6 +19,12 @@ def test_adapter_address_uses_standard_adapter_when_not_neg_risk():
 
 def test_adapter_address_uses_neg_risk_adapter():
     assert adapter_address_for_position({"negativeRisk": True}) == NEG_RISK_CTF_COLLATERAL_ADAPTER
+
+
+def test_relayer_headers_include_user_agent_for_cloudflare():
+    headers = _relayer_headers("rk-test", "0xsigner")
+    assert headers["User-Agent"] == RELAYER_USER_AGENT
+    assert headers["RELAYER_API_KEY"] == "rk-test"
 
 
 def test_encode_redeem_positions_calldata_is_nonempty():

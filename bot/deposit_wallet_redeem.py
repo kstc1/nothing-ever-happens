@@ -21,6 +21,8 @@ from web3 import Web3
 logger = logging.getLogger(__name__)
 
 RELAYER_BASE = "https://relayer-v2.polymarket.com"
+# Cloudflare BIC blocks urllib's default User-Agent (often returns HTTP 403, body "error code: 1010").
+RELAYER_USER_AGENT = "nothing-ever-happens-bot/1.0 (polymarket-deposit-wallet)"
 DEPOSIT_WALLET_FACTORY = "0x00000000000Fb5C9ADea0298D729A0CB3823Cc07"
 CTF_COLLATERAL_ADAPTER = "0xAdA100Db00Ca00073811820692005400218FcE1f"
 NEG_RISK_CTF_COLLATERAL_ADAPTER = "0xadA2005600Dec949baf300f4C6120000bDB6eAab"
@@ -76,6 +78,8 @@ def encode_redeem_positions_calldata(condition_id: str) -> str:
 def _relayer_headers(api_key: str, api_key_address: str) -> dict[str, str]:
     return {
         "Content-Type": "application/json",
+        "User-Agent": RELAYER_USER_AGENT,
+        "Accept": "application/json",
         "RELAYER_API_KEY": api_key,
         "RELAYER_API_KEY_ADDRESS": api_key_address,
     }
@@ -90,6 +94,20 @@ def _http_json(method: str, url: str, headers: dict[str, str], body: dict | None
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         logger.error("deposit_wallet_relayer_http_error status=%s url=%s detail=%s", exc.code, url, detail)
+        if exc.code == 403 and "1010" in detail:
+            logger.error(
+                "deposit_wallet_relayer_cloudflare_1010: Cloudflare blocked this client "
+                "(common on VPS with default urllib). Verify RELAYER_API_KEY / "
+                "RELAYER_API_KEY_ADDRESS match Polymarket Settings and PRIVATE_KEY signer; "
+                "retry after deploy with RELAYER_USER_AGENT=%s",
+                RELAYER_USER_AGENT,
+            )
+        if exc.code == 401:
+            logger.error(
+                "deposit_wallet_relayer_auth_rejected: RELAYER_API_KEY_ADDRESS must be the "
+                "Signer Address from Polymarket and must match the EOA from PRIVATE_KEY "
+                "(POST /submit field from)."
+            )
         raise RuntimeError(f"Relayer HTTP {exc.code} for {url}: {detail}") from exc
     except Exception as exc:
         logger.error("deposit_wallet_relayer_request_failed url=%s err=%s", url, exc)
