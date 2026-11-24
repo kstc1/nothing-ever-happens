@@ -11,6 +11,7 @@ import aiohttp
 from dotenv import load_dotenv
 
 from bot.config import load_nothing_happens_config
+from bot.healthchecks import ping_healthchecks
 from bot.exchange.paper import PaperExchangeClient
 from bot.live_recovery import LiveRecoveryCoordinator
 from bot.logging_config import configure_logging
@@ -314,16 +315,19 @@ async def run():
 
         async def _heartbeat():
             start = time.monotonic()
+            await ping_healthchecks()
             while not shutdown.is_set():
                 await asyncio.sleep(60)
                 elapsed = time.monotonic() - start
                 mins, secs = divmod(int(elapsed), 60)
                 portfolio = portfolio_state.snapshot()
                 control = nothing_happens_control.snapshot()
+                healthchecks_ping = await ping_healthchecks()
                 logger.info(
                     "heartbeat",
                     extra={
                         "uptime": f"{mins}m{secs:02d}s",
+                        "healthchecks_ping": healthchecks_ping,
                         "monitored_markets": portfolio.monitored_markets,
                         "eligible_markets": portfolio.eligible_markets,
                         "in_range_markets": portfolio.in_range_markets,

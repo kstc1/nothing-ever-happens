@@ -100,6 +100,12 @@ python -m bot.main
 
 The dashboard binds `$PORT` or `DASHBOARD_PORT` when one is set.
 
+## Healthchecks.io ping
+
+The process pings [Healthchecks.io](https://healthchecks.io/docs/) so you get an alert if the dyno stops. Set `HEALTHCHECKS_PING_URL` to the check's success URL (`https://hc-ping.com/<uuid>`). The bot sends one GET at startup and another on each 60-second heartbeat. Leave the variable empty and the ping stays off.
+
+On the check, use a simple schedule: period 2 minutes, grace 5 minutes. One missed ping then waits out the grace time before the alert. The URL is a secret; do not commit it.
+
 ## Heroku Workflow
 
 The shell helpers use either an explicit app name argument or `HEROKU_APP_NAME`.
