@@ -27,11 +27,9 @@ from bot.trade_ledger import record_order
 
 logger = logging.getLogger(__name__)
 
-from bot.data_api import (
-    fetch_wallet_positions_async,
-    position_condition_id,
-    position_current_size,
-)
+# Polymarket Data API (unauthenticated)
+DATA_API_BASE = "https://data-api.polymarket.com"
+POSITIONS_ENDPOINT = f"{DATA_API_BASE}/positions"
 
 # Polymarket collateral: pUSD on Polygon (V2)
 USDC_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
@@ -47,6 +45,7 @@ DEFAULT_REDEEM_CHECK_INTERVAL_SEC = max(
     int(os.getenv("PM_REDEEM_CHECK_INTERVAL_SEC", "30")),
 )
 FETCH_TIMEOUT_SEC = 30
+POSITIONS_PAGE_LIMIT = 100
 MAX_GAS_GWEI = max(1.0, float(os.getenv("PM_REDEEMER_MAX_GAS_GWEI", "150")))
 MAX_RETRIES = 3  # retries before cooldown (not permanent blacklist)
 RETRY_COOLDOWN_SEC = 600  # 10 min cooldown after MAX_RETRIES failures
@@ -131,9 +130,9 @@ class Redeemer:
 
                 to_redeem = [
                     p for p in positions
-                    if position_condition_id(p)
-                    and position_condition_id(p) not in self._redeemed
-                    and self._failed_attempts.get(position_condition_id(p), 0) < MAX_RETRIES
+                    if p.get("conditionId")
+                    and p["conditionId"] not in self._redeemed
+                    and self._failed_attempts.get(p["conditionId"], 0) < MAX_RETRIES
                 ]
                 if to_redeem:
                     logger.info(
@@ -144,7 +143,7 @@ class Redeemer:
                             "already_redeemed": len(self._redeemed),
                             "max_retried_out": sum(
                                 1 for p in positions
-                                if self._failed_attempts.get(position_condition_id(p), 0) >= MAX_RETRIES
+                                if self._failed_attempts.get(p.get("conditionId", ""), 0) >= MAX_RETRIES
                             ),
                         },
                     )
@@ -155,23 +154,55 @@ class Redeemer:
     async def _fetch_redeemable_positions(self) -> list[dict]:
         """Query Polymarket Data API for redeemable positions held by this wallet."""
         try:
+            positions: list[dict] = []
+            offset = 0
             if self._session is not None:
-                return await fetch_wallet_positions_async(
-                    self._session,
-                    self._proxy_address,
-                    status="REDEEMABLE",
-                    timeout_sec=FETCH_TIMEOUT_SEC,
-                )
+                session = self._session
+                while True:
+                    page = await self._do_fetch(session, offset=offset)
+                    positions.extend(page)
+                    if len(page) < POSITIONS_PAGE_LIMIT:
+                        return positions
+                    offset += len(page)
             async with aiohttp.ClientSession() as session:
-                return await fetch_wallet_positions_async(
-                    session,
-                    self._proxy_address,
-                    status="REDEEMABLE",
-                    timeout_sec=FETCH_TIMEOUT_SEC,
-                )
+                while True:
+                    page = await self._do_fetch(session, offset=offset)
+                    positions.extend(page)
+                    if len(page) < POSITIONS_PAGE_LIMIT:
+                        return positions
+                    offset += len(page)
         except Exception as e:
             logger.warning("redeemer_fetch_failed: %s", e)
             return []
+
+    async def _do_fetch(self, session: aiohttp.ClientSession, *, offset: int) -> list[dict]:
+        params = {
+            "user": self._proxy_address,
+            "redeemable": "true",
+            "sizeThreshold": "0",
+            "limit": str(POSITIONS_PAGE_LIMIT),
+            "offset": str(offset),
+        }
+        async with session.get(
+            POSITIONS_ENDPOINT,
+            params=params,
+            timeout=aiohttp.ClientTimeout(total=FETCH_TIMEOUT_SEC),
+        ) as resp:
+            if resp.status != 200:
+                logger.warning(
+                    "redeemer_api_error: status=%d", resp.status,
+                )
+                return []
+            data = await resp.json()
+            if isinstance(data, dict):
+                data = data.get("data") or data.get("positions") or []
+            if not isinstance(data, list):
+                logger.warning(
+                    "redeemer_api_unexpected: type=%s",
+                    type(data).__name__,
+                )
+                return []
+            return [item for item in data if isinstance(item, dict)]
 
     def _clear_stuck_nonces(self, w3: Web3) -> bool:
         """Detect and cancel stuck transactions by sending zero-value replacements.
@@ -301,9 +332,9 @@ class Redeemer:
             ctf = w3.eth.contract(address=ct_address, abi=CTF_REDEEM_ABI)
 
         for i, pos in enumerate(positions):
-            condition_id = position_condition_id(pos)
+            condition_id = pos["conditionId"]
             slug = pos.get("slug") or pos.get("title") or condition_id[:20]
-            size = position_current_size(pos)
+            size = pos.get("size", 0)
 
             try:
                 cid_hex = condition_id

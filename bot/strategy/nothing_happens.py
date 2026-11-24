@@ -32,10 +32,12 @@ logger = logging.getLogger(__name__)
 
 LIMIT_ORDER_POLL_INTERVAL_SEC = 30
 
-from bot.data_api import fetch_wallet_positions_async
-
+DATA_API_BASE = "https://data-api.polymarket.com"
+POSITIONS_ENDPOINT = f"{DATA_API_BASE}/positions"
 BALANCE_DUST_THRESHOLD = 0.01
 POSITION_GRACE_SEC = 300.0
+POSITIONS_FETCH_TIMEOUT_SEC = 30.0
+POSITIONS_PAGE_LIMIT = 100
 SUCCESS_ORDER_STATUSES = {"matched", "filled", "simulated"}
 
 
@@ -189,11 +191,7 @@ def _position_snapshot_from_local(position: LocalPosition) -> PositionSnapshot:
 
 def _position_snapshot_from_api(position: dict, market: StandaloneMarket | None) -> PositionSnapshot:
     title = str(position.get("title") or (market.question if market is not None else ""))
-    end_date = str(
-        position.get("end_date")
-        or position.get("endDate")
-        or (market.end_date if market is not None else "")
-    )
+    end_date = str(position.get("endDate") or (market.end_date if market is not None else ""))
     if market is not None:
         end_ts = market.end_ts
     elif end_date:
@@ -203,43 +201,63 @@ def _position_snapshot_from_api(position: dict, market: StandaloneMarket | None)
             end_ts = 0.0
     else:
         end_ts = 0.0
-    condition_id = position.get("condition_id") or position.get("conditionId")
-    token_id = position.get("token_id") or position.get("asset")
-    size_raw = position.get("current_size", position.get("size"))
-    initial_value_raw = position.get("entry_cost_usdc", position.get("initialValue"))
-    current_price_raw = position.get("current_price", position.get("curPrice"))
-    current_value_raw = position.get("current_value", position.get("currentValue"))
-    pnl_usd_raw = position.get("unrealized_pnl", position.get("cashPnl"))
-    pnl_pct_raw = position.get("percent_pnl", position.get("percentPnl"))
     return PositionSnapshot(
         slug=str(position.get("slug") or ""),
         title=title,
         outcome=str(position.get("outcome") or ""),
-        asset=str(token_id or ""),
-        condition_id=str(condition_id or (market.condition_id if market is not None else "")),
-        size=_safe_float(size_raw),
-        avg_price=_safe_float(position.get("avg_price", position.get("avgPrice"))),
-        initial_value=_safe_float(initial_value_raw),
-        current_price=_safe_float(current_price_raw),
-        current_value=_safe_float(current_value_raw),
-        pnl_usd=_safe_float(pnl_usd_raw),
-        pnl_pct=_safe_float(pnl_pct_raw),
+        asset=str(position.get("asset") or ""),
+        condition_id=str(position.get("conditionId") or (market.condition_id if market is not None else "")),
+        size=_safe_float(position.get("size")),
+        avg_price=_safe_float(position.get("avgPrice")),
+        initial_value=_safe_float(position.get("initialValue")),
+        current_price=_safe_float(position.get("curPrice")),
+        current_value=_safe_float(position.get("currentValue")),
+        pnl_usd=_safe_float(position.get("cashPnl")),
+        pnl_pct=_safe_float(position.get("percentPnl")),
         end_date=end_date,
         eta_seconds=_eta_seconds(end_ts),
         source="data_api",
     )
 
 
+def _extract_positions_payload(payload) -> list[dict]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        if "data" in payload and isinstance(payload.get("data"), list):
+            return [item for item in payload["data"] if isinstance(item, dict)]
+        if "positions" in payload and isinstance(payload.get("positions"), list):
+            return [item for item in payload["positions"] if isinstance(item, dict)]
+        raise ValueError("positions response missing data/positions list")
+    raise ValueError("unexpected positions response payload")
+
+
 async def _fetch_open_positions(
     session: aiohttp.ClientSession,
     wallet_address: str,
 ) -> list[dict]:
-    return await fetch_wallet_positions_async(
-        session,
-        wallet_address,
-        status="OPEN",
-        exclude_redeemable=True,
-    )
+    all_positions: list[dict] = []
+    offset = 0
+    timeout = aiohttp.ClientTimeout(total=POSITIONS_FETCH_TIMEOUT_SEC)
+    while True:
+        async with session.get(
+            POSITIONS_ENDPOINT,
+            params={
+                "user": wallet_address,
+                "redeemable": "false",
+                "sizeThreshold": "0",
+                "limit": str(POSITIONS_PAGE_LIMIT),
+                "offset": str(offset),
+            },
+            timeout=timeout,
+        ) as resp:
+            resp.raise_for_status()
+            payload = await resp.json()
+        page = _extract_positions_payload(payload)
+        all_positions.extend(page)
+        if len(page) < POSITIONS_PAGE_LIMIT:
+            return all_positions
+        offset += len(page)
 
 
 def market_passes_strategy_lifecycle(market: StandaloneMarket, cfg: NothingHappensConfig) -> bool:

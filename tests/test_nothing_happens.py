@@ -677,14 +677,8 @@ async def test_success_without_fill_quantities_quarantines_instead_of_fabricatin
 
 @pytest.mark.asyncio
 async def test_fetch_open_positions_paginates_all_pages() -> None:
-    first_page = {
-        "data": [{"slug": f"market-{index}"} for index in range(100)],
-        "pagination": {"next_cursor": "cursor-page-2"},
-    }
-    second_page = {
-        "data": [{"slug": "market-100"}],
-        "pagination": {"next_cursor": None},
-    }
+    first_page = [{"slug": f"market-{index}"} for index in range(100)]
+    second_page = [{"slug": "market-100"}]
     session = StubGammaSession(
         [
             StubGammaResponse(payload=first_page, status=200),
